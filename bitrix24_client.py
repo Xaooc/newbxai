@@ -48,7 +48,29 @@ import json
 import logging
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Tuple, Union
 
-import requests
+try:  # pragma: no cover
+    import requests
+except ImportError:  # pragma: no cover
+    class _DummyResponse:
+        def __init__(self, message: str = "requests не установлен") -> None:
+            self.status_code = 500
+            self.text = message
+
+        def json(self):  # noqa: D401
+            raise ValueError(self.text)
+
+    class _DummySession:
+        def get(self, *args, **kwargs):  # noqa: D401, ANN002, ANN003
+            raise RuntimeError("requests не установлен")
+
+        def post(self, *args, **kwargs):  # noqa: D401, ANN002, ANN003
+            raise RuntimeError("requests не установлен")
+
+    class _DummyRequests:  # noqa: D401
+        Session = _DummySession
+        RequestException = RuntimeError
+
+    requests = _DummyRequests()  # type: ignore
 
 
 __all__ = ["Bitrix24Client", "Bitrix24Error"]
