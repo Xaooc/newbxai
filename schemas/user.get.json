@@ -1,0 +1,20 @@
+{
+  "method": "user.get",
+  "required": ["filter"],
+  "properties": {
+    "filter": {
+      "type": "object",
+      "description": "Набор фильтров, например {\"ACTIVE\": \"true\"}."
+    },
+    "select": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Список полей для выборки."
+    },
+    "order": {
+      "type": "object",
+      "description": "Сортировка, напр. {\"ID\": \"ASC\"}."
+    }
+  },
+  "description": "Получает список пользователей."
+}
