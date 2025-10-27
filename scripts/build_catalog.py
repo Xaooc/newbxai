@@ -28,13 +28,17 @@ def configure_logging(verbose: bool) -> None:
     logging.basicConfig(
         level=level,
         format="%(asctime)s | %(levelname)s | %(message)s",
+        force=True,
     )
+    LOGGER.debug("Логирование настроено: уровень=%s", logging.getLevelName(level))
 
 
 def iter_schema_files(schema_dir: pathlib.Path) -> Iterable[pathlib.Path]:
     """Возвращает отсортированный список файлов схем."""
 
-    return sorted(schema_dir.glob("*.json"))
+    files = sorted(schema_dir.glob("*.json"))
+    LOGGER.debug("Найдено %d json-файлов в каталоге схем", len(files))
+    return files
 
 
 def build_index(schema_dir: pathlib.Path) -> Dict[str, MethodIndex]:
@@ -43,8 +47,10 @@ def build_index(schema_dir: pathlib.Path) -> Dict[str, MethodIndex]:
     index: Dict[str, MethodIndex] = {}
     LOGGER.info("Начинаем построение индекса по каталогу %s", schema_dir)
     for path in iter_schema_files(schema_dir):
-        LOGGER.debug("Обработка файла схемы %s", path.name)
-        data = json.loads(path.read_text(encoding="utf-8"))
+        LOGGER.debug("Читаю файл схемы %s", path.name)
+        raw_text = path.read_text(encoding="utf-8")
+        LOGGER.debug("Размер файла %s: %d байт", path.name, len(raw_text.encode("utf-8")))
+        data = json.loads(raw_text)
         method = data.get("method")
         if method is None:
             LOGGER.warning("Файл %s пропущен: отсутствует ключ 'method'", path.name)
@@ -59,6 +65,10 @@ def build_index(schema_dir: pathlib.Path) -> Dict[str, MethodIndex]:
             len(required),
             len(optional),
         )
+        if required:
+            LOGGER.debug("Обязательные поля метода %s: %s", method, ", ".join(required))
+        if optional:
+            LOGGER.debug("Необязательные поля метода %s: %s", method, ", ".join(optional))
     LOGGER.info("Индекс построен, всего методов: %d", len(index))
     return index
 
@@ -74,7 +84,9 @@ def dump_index(index: Dict[str, MethodIndex], destination: pathlib.Path) -> None
         for method, item in index.items()
     }
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+    destination.write_text(serialized, encoding="utf-8")
+    LOGGER.debug("В файл будет записано %d символов", len(serialized))
     LOGGER.info("Файл индекса сохранён по пути %s", destination)
 
 
@@ -125,10 +137,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         LOGGER.error("Указанный путь не является директорией: %s", schema_dir)
         raise NotADirectoryError(f"Schema path is not a directory: {schema_dir}")
     schema_dir = schema_dir.resolve()
+    LOGGER.debug("Используем абсолютный путь к каталогу схем: %s", schema_dir)
 
     output_arg = args.output.expanduser() if args.output else None
     output_path = resolve_output_path(schema_dir, output_arg)
     output_path = output_path.resolve()
+    LOGGER.debug("Итоговый путь к файлу индекса: %s", output_path)
+    if not output_path.parent.exists():
+        LOGGER.debug("Каталог %s отсутствует и будет создан", output_path.parent)
 
     LOGGER.info(
         "Запуск генерации индекса (каталог схем: %s, файл назначения: %s, подробные логи: %s)",
