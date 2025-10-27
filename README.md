@@ -29,14 +29,7 @@
 4. Запустите вебхук:
 
 ```bash
-python -m telegram_bitrix_agent.main
-```
-
-### Docker
-
-```bash
-docker build -t telegram-bitrix-agent .
-docker run --env-file .env -p 8000:8000 telegram-bitrix-agent
+python run_bot.py
 ```
 
 ## Тесты
