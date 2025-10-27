@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
+from functools import partial
 
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import CommandStart
@@ -24,6 +26,40 @@ class TelegramAssistantBot:
         self._router = Router()
         self._setup_routes()
         self._dispatcher.include_router(self._router)
+
+    async def _send_response(
+        self, sender: Callable[[str], Awaitable[object]], text: str
+    ) -> None:
+        """Отправляет длинные ответы порциями, чтобы не превышать лимит Telegram."""
+
+        for chunk in self._split_response(text):
+            await sender(chunk)
+
+    def _split_response(self, text: str, limit: int = 4096) -> list[str]:
+        """Разбивает текст на части не длиннее `limit` символов."""
+
+        if len(text) <= limit:
+            return [text]
+        if not text:
+            return [text]
+
+        parts: list[str] = []
+        remaining = text
+        while remaining:
+            if len(remaining) <= limit:
+                parts.append(remaining)
+                break
+            split_idx = remaining.rfind("\n", 0, limit + 1)
+            if split_idx <= 0:
+                split_idx = remaining.rfind(" ", 0, limit + 1)
+            if split_idx <= 0:
+                split_idx = limit
+            chunk = remaining[:split_idx]
+            parts.append(chunk)
+            remaining = remaining[split_idx:]
+            while remaining and remaining[0] in ("\n", " "):
+                remaining = remaining[1:]
+        return parts
 
     @property
     def router(self) -> Router:
@@ -53,7 +89,7 @@ class TelegramAssistantBot:
                 return
             chat_id = str(message.chat.id)
             response = await self._orchestrator.handle(chat_id, message.text)
-            await message.answer(response)
+            await self._send_response(message.answer, response)
 
         @self._router.callback_query()
         async def handle_callback(callback: types.CallbackQuery) -> None:
@@ -71,9 +107,10 @@ class TelegramAssistantBot:
                 chat_id = "unknown"
             response = await self._orchestrator.handle(chat_id, data)
             if callback.message:
-                await callback.message.answer(response)
+                await self._send_response(callback.message.answer, response)
             else:
-                await self._bot.send_message(chat_id, response)
+                send_message = partial(self._bot.send_message, chat_id)
+                await self._send_response(send_message, response)
             await callback.answer()
 
     async def on_startup(self, _: Dispatcher) -> None:
