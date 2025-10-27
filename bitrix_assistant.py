@@ -36,6 +36,7 @@ class BitrixToolset:
     def __init__(self, client: Bitrix24Client) -> None:
         self._client = client
         self._method_specs = self._collect_public_methods(client)
+
     @staticmethod
     def _collect_public_methods(client: Bitrix24Client) -> List[BitrixMethodSpec]:
         specs: List[BitrixMethodSpec] = []
@@ -68,13 +69,13 @@ class BitrixToolset:
     def build_tools(self) -> List[StructuredTool]:
         tools: List[StructuredTool] = []
         for spec in self._method_specs:
-            logger.debug("Готовлю инструмент для метода Bitrix24: %s", spec.name)
+            logger.debug("Р“РѕС‚РѕРІР»СЋ РёРЅСЃС‚СЂСѓРјРµРЅС‚ РґР»СЏ РјРµС‚РѕРґР° Bitrix24: %s", spec.name)
             tool = self._build_tool(spec)
             if tool is not None:
-                logger.debug("Инструмент %s успешно создан.", spec.name)
+                logger.debug("РРЅСЃС‚СЂСѓРјРµРЅС‚ %s СѓСЃРїРµС€РЅРѕ СЃРѕР·РґР°РЅ.", spec.name)
                 tools.append(tool)
             else:
-                logger.debug("Инструмент для метода %s опущен из-за неподдерживаемой сигнатуры.", spec.name)
+                logger.debug("РРЅСЃС‚СЂСѓРјРµРЅС‚ РґР»СЏ РјРµС‚РѕРґР° %s РѕРїСѓС‰РµРЅ РёР·-Р·Р° РЅРµРїРѕРґРґРµСЂР¶РёРІР°РµРјРѕР№ СЃРёРіРЅР°С‚СѓСЂС‹.", spec.name)
         return tools
     def _build_tool(self, spec: BitrixMethodSpec) -> StructuredTool | None:
         args_model = self._build_args_model(spec)
@@ -83,9 +84,9 @@ class BitrixToolset:
             return None
         method = getattr(self._client, spec.name)
         description = self._compose_description(spec, args_model)
-        logger.debug("Создаю StructuredTool для метода %s.", spec.name)
+        logger.debug("РЎРѕР·РґР°СЋ StructuredTool РґР»СЏ РјРµС‚РѕРґР° %s.", spec.name)
         def _invoke(**kwargs: Any) -> str:
-            logger.debug("Инструмент %s получил вход: %s", spec.name, kwargs)
+            logger.debug("РРЅСЃС‚СЂСѓРјРµРЅС‚ %s РїРѕР»СѓС‡РёР» РІС…РѕРґ: %s", spec.name, kwargs)
             try:
                 parsed = args_model(**kwargs)
             except ValidationError as exc:
@@ -96,10 +97,10 @@ class BitrixToolset:
                     params=kwargs,
                     payload={"type": "ValidationError", "message": exc.errors()},
                 )
-                logger.debug("Инструмент %s завершился ошибкой валидации: %s", spec.name, error_payload)
+                logger.debug("РРЅСЃС‚СЂСѓРјРµРЅС‚ %s Р·Р°РІРµСЂС€РёР»СЃСЏ РѕС€РёР±РєРѕР№ РІР°Р»РёРґР°С†РёРё: %s", spec.name, error_payload)
                 return error_payload
             params = parsed.model_dump(mode="json", exclude_none=True)
-            logger.debug("Инструмент %s вызывает Bitrix24 с параметрами: %s", spec.name, params)
+            logger.debug("РРЅСЃС‚СЂСѓРјРµРЅС‚ %s РІС‹Р·С‹РІР°РµС‚ Bitrix24 СЃ РїР°СЂР°РјРµС‚СЂР°РјРё: %s", spec.name, params)
             try:
                 result = method(**params)
             except Bitrix24Error as exc:
@@ -123,7 +124,7 @@ class BitrixToolset:
                         "recommendations": recommendations,
                     },
                 )
-                logger.debug("Инструмент %s вернул ошибку Bitrix24: %s", spec.name, error_payload)
+                logger.debug("РРЅСЃС‚СЂСѓРјРµРЅС‚ %s РІРµСЂРЅСѓР» РѕС€РёР±РєСѓ Bitrix24: %s", spec.name, error_payload)
                 return error_payload
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Unexpected error while calling %s", spec.name)
@@ -138,7 +139,7 @@ class BitrixToolset:
                         "recommendations": recommendations,
                     },
                 )
-                logger.debug("Инструмент %s завершился неожиданной ошибкой: %s", spec.name, error_payload)
+                logger.debug("РРЅСЃС‚СЂСѓРјРµРЅС‚ %s Р·Р°РІРµСЂС€РёР»СЃСЏ РЅРµРѕР¶РёРґР°РЅРЅРѕР№ РѕС€РёР±РєРѕР№: %s", spec.name, error_payload)
                 return error_payload
             success_payload = self._format_response(
                 status="ok",
@@ -146,7 +147,7 @@ class BitrixToolset:
                 params=params,
                 payload={"result": result},
             )
-            logger.debug("Инструмент %s успешно завершён. Payload: %s", spec.name, success_payload)
+            logger.debug("РРЅСЃС‚СЂСѓРјРµРЅС‚ %s СѓСЃРїРµС€РЅРѕ Р·Р°РІРµСЂС€С‘РЅ. Payload: %s", spec.name, success_payload)
             return success_payload
         return StructuredTool.from_function(
             func=_invoke,
@@ -176,12 +177,12 @@ class BitrixToolset:
         args_model.model_rebuild()
         return args_model
     def _compose_description(self, spec: BitrixMethodSpec, args_model: type[BaseModel]) -> str:
-        lines = [spec.summary, "", "Параметры:"]
+        lines = [spec.summary, "", "РџР°СЂР°РјРµС‚СЂС‹:"]
         for field_name, field in args_model.model_fields.items():
-            requirement = "обязательный" if field.is_required() else f"по умолчанию: {field.default!r}"
+            requirement = "РѕР±СЏР·Р°С‚РµР»СЊРЅС‹Р№" if field.is_required() else f"РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ: {field.default!r}"
             detail = field.description or ""
             lines.append(f"- {field_name}: {detail} ({requirement})")
-        lines.append("Возвращает JSON-ответ со статусом и данными Bitrix24.")
+        lines.append("Р’РѕР·РІСЂР°С‰Р°РµС‚ JSON-РѕС‚РІРµС‚ СЃРѕ СЃС‚Р°С‚СѓСЃРѕРј Рё РґР°РЅРЅС‹РјРё Bitrix24.")
         return "\n".join(lines)
     def _format_response(
         self,
@@ -211,21 +212,21 @@ class BitrixToolset:
         normalized_code = (b24_code or "").upper()
         normalized_message = (message or "").lower()
         if http_status in {401, 403} or "ACCESS_DENIED" in normalized_code:
-            suggestions.append("Проверьте права доступа и корректность OAuth-токена Bitrix24.")
+            suggestions.append("РџСЂРѕРІРµСЂСЊС‚Рµ РїСЂР°РІР° РґРѕСЃС‚СѓРїР° Рё РєРѕСЂСЂРµРєС‚РЅРѕСЃС‚СЊ OAuth-С‚РѕРєРµРЅР° Bitrix24.")
         if http_status == 404 or "not found" in normalized_message:
-            suggestions.append("Убедитесь, что указанные идентификаторы существуют в Bitrix24.")
+            suggestions.append("РЈР±РµРґРёС‚РµСЃСЊ, С‡С‚Рѕ СѓРєР°Р·Р°РЅРЅС‹Рµ РёРґРµРЅС‚РёС„РёРєР°С‚РѕСЂС‹ СЃСѓС‰РµСЃС‚РІСѓСЋС‚ РІ Bitrix24.")
         if http_status in {408, 504} or "timeout" in normalized_message:
-            suggestions.append("Повторите запрос позже или уменьшите объём данных, чтобы избежать таймаута.")
+            suggestions.append("РџРѕРІС‚РѕСЂРёС‚Рµ Р·Р°РїСЂРѕСЃ РїРѕР·Р¶Рµ РёР»Рё СѓРјРµРЅСЊС€РёС‚Рµ РѕР±СЉС‘Рј РґР°РЅРЅС‹С…, С‡С‚РѕР±С‹ РёР·Р±РµР¶Р°С‚СЊ С‚Р°Р№РјР°СѓС‚Р°.")
         if "required parameter missing" in normalized_message or "missing parameter" in normalized_message:
-            suggestions.append("Заполните обязательные параметры метода Bitrix24.")
+            suggestions.append("Р—Р°РїРѕР»РЅРёС‚Рµ РѕР±СЏР·Р°С‚РµР»СЊРЅС‹Рµ РїР°СЂР°РјРµС‚СЂС‹ РјРµС‚РѕРґР° Bitrix24.")
         if "limit" in normalized_message or "too many requests" in normalized_message:
-            suggestions.append("Снизьте частоту запросов или используйте пакетные операции Bitrix24.")
+            suggestions.append("РЎРЅРёР·СЊС‚Рµ С‡Р°СЃС‚РѕС‚Сѓ Р·Р°РїСЂРѕСЃРѕРІ РёР»Рё РёСЃРїРѕР»СЊР·СѓР№С‚Рµ РїР°РєРµС‚РЅС‹Рµ РѕРїРµСЂР°С†РёРё Bitrix24.")
         if not suggestions:
-            suggestions.append("Изучите ответ Bitrix24, исправьте причину ошибки и повторите запрос.")
+            suggestions.append("РР·СѓС‡РёС‚Рµ РѕС‚РІРµС‚ Bitrix24, РёСЃРїСЂР°РІСЊС‚Рµ РїСЂРёС‡РёРЅСѓ РѕС€РёР±РєРё Рё РїРѕРІС‚РѕСЂРёС‚Рµ Р·Р°РїСЂРѕСЃ.")
         if params:
-            suggestions.append(f"Параметры запроса: {dict(params)}")
+            suggestions.append(f"РџР°СЂР°РјРµС‚СЂС‹ Р·Р°РїСЂРѕСЃР°: {dict(params)}")
         logger.debug(
-            "Рекомендации для Bitrix24 method=%s status=%s code=%s: %s",
+            "Р РµРєРѕРјРµРЅРґР°С†РёРё РґР»СЏ Bitrix24 method=%s status=%s code=%s: %s",
             method_name,
             http_status,
             b24_code,
@@ -235,25 +236,25 @@ class BitrixToolset:
 class CalendarEventsForUsersArgs(BaseModel):
     date: Optional[str] = Field(
         None,
-        description="Дата в формате YYYY-MM-DD или ISO. Если не указана, берётся текущий день.",
+        description="Р”Р°С‚Р° РІ С„РѕСЂРјР°С‚Рµ YYYY-MM-DD РёР»Рё ISO. Р•СЃР»Рё РЅРµ СѓРєР°Р·Р°РЅР°, Р±РµСЂС‘С‚СЃСЏ С‚РµРєСѓС‰РёР№ РґРµРЅСЊ.",
     )
     user_ids: Optional[List[int]] = Field(
         None,
-        description="Список ID сотрудников Bitrix24. Если не указан, используется список активных сотрудников.",
+        description="РЎРїРёСЃРѕРє ID СЃРѕС‚СЂСѓРґРЅРёРєРѕРІ Bitrix24. Р•СЃР»Рё РЅРµ СѓРєР°Р·Р°РЅ, РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ СЃРїРёСЃРѕРє Р°РєС‚РёРІРЅС‹С… СЃРѕС‚СЂСѓРґРЅРёРєРѕРІ.",
     )
     include_inactive: bool = Field(
         False,
-        description="Включать ли пользователей с ACTIVE='N' (используется только если user_ids не задан).",
+        description="Р’РєР»СЋС‡Р°С‚СЊ Р»Рё РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№ СЃ ACTIVE='N' (РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ С‚РѕР»СЊРєРѕ РµСЃР»Рё user_ids РЅРµ Р·Р°РґР°РЅ).",
     )
     timezone: Optional[str] = Field(
         None,
-        description="Часовой пояс, например 'Europe/Moscow'. Если не указан, используется локальный.",
+        description="Р§Р°СЃРѕРІРѕР№ РїРѕСЏСЃ, РЅР°РїСЂРёРјРµСЂ 'Europe/Moscow'. Р•СЃР»Рё РЅРµ СѓРєР°Р·Р°РЅ, РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ Р»РѕРєР°Р»СЊРЅС‹Р№.",
     )
     max_users: int = Field(
         100,
         ge=1,
         le=500,
-        description="Максимальное количество пользователей, для которых выгружаются события.",
+        description="РњР°РєСЃРёРјР°Р»СЊРЅРѕРµ РєРѕР»РёС‡РµСЃС‚РІРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№, РґР»СЏ РєРѕС‚РѕСЂС‹С… РІС‹РіСЂСѓР¶Р°СЋС‚СЃСЏ СЃРѕР±С‹С‚РёСЏ.",
     )
 def _calendar_events_for_users(client: Bitrix24Client, args: CalendarEventsForUsersArgs) -> Dict[str, Any]:
     tz = _resolve_timezone(args.timezone)
@@ -277,7 +278,7 @@ def _calendar_events_for_users(client: Bitrix24Client, args: CalendarEventsForUs
             return {
                 "status": "error",
                 "method": "calendar_events_for_users",
-                "message": "Параметр user_ids не содержит допустимых значений.",
+                "message": "РџР°СЂР°РјРµС‚СЂ user_ids РЅРµ СЃРѕРґРµСЂР¶РёС‚ РґРѕРїСѓСЃС‚РёРјС‹С… Р·РЅР°С‡РµРЅРёР№.",
             }
         try:
             filter_payload: Mapping[str, Any] = {"ID": [str(uid) for uid in ids]}
@@ -287,7 +288,7 @@ def _calendar_events_for_users(client: Bitrix24Client, args: CalendarEventsForUs
                 fetch_all=False,
             )
         except Bitrix24Error as exc:
-            logger.warning("Не удалось загрузить карточки пользователей %s: %s", ids, exc)
+            logger.warning("РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ РєР°СЂС‚РѕС‡РєРё РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№ %s: %s", ids, exc)
             user_records = [{"ID": uid} for uid in ids]
     else:
         filter_payload = {"ACTIVE": "true"} if not args.include_inactive else None
@@ -301,7 +302,7 @@ def _calendar_events_for_users(client: Bitrix24Client, args: CalendarEventsForUs
             return {
                 "status": "error",
                 "method": "calendar_events_for_users",
-                "message": f"Не удалось получить список сотрудников: {exc}",
+                "message": f"РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ СЃРїРёСЃРѕРє СЃРѕС‚СЂСѓРґРЅРёРєРѕРІ: {exc}",
             }
     if not user_records:
         return {
@@ -311,7 +312,7 @@ def _calendar_events_for_users(client: Bitrix24Client, args: CalendarEventsForUs
             "users_processed": 0,
             "events_total": 0,
             "users": [],
-            "notice": "Активных сотрудников не найдено.",
+            "notice": "РђРєС‚РёРІРЅС‹С… СЃРѕС‚СЂСѓРґРЅРёРєРѕРІ РЅРµ РЅР°Р№РґРµРЅРѕ.",
         }
     if args.max_users and len(user_records) > args.max_users:
         truncated = True
@@ -390,7 +391,7 @@ def _resolve_timezone(value: Optional[str]) -> ZoneInfo:
         try:
             return ZoneInfo(value)
         except ZoneInfoNotFoundError:
-            logger.warning("Не удалось распознать часовой пояс %s. Используется локальный по умолчанию.", value)
+            logger.warning("РќРµ СѓРґР°Р»РѕСЃСЊ СЂР°СЃРїРѕР·РЅР°С‚СЊ С‡Р°СЃРѕРІРѕР№ РїРѕСЏСЃ %s. РСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ Р»РѕРєР°Р»СЊРЅС‹Р№ РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ.", value)
     local_tz = datetime.now().astimezone().tzinfo
     if isinstance(local_tz, ZoneInfo):
         return local_tz
@@ -459,7 +460,7 @@ def _build_calendar_events_tool(client: Bitrix24Client) -> StructuredTool:
                 {
                     "status": "error",
                     "method": "calendar_events_for_users",
-                    "message": "Параметры не прошли валидацию.",
+                    "message": "РџР°СЂР°РјРµС‚СЂС‹ РЅРµ РїСЂРѕС€Р»Рё РІР°Р»РёРґР°С†РёСЋ.",
                     "details": exc.errors(),
                 },
                 ensure_ascii=False,
@@ -470,17 +471,52 @@ def _build_calendar_events_tool(client: Bitrix24Client) -> StructuredTool:
         func=_run,
         name="calendar_events_for_users",
         description=(
-            "Получает календарные события за указанный день для выбранных сотрудников или всех активных, если user_ids не заданы."
-            " По умолчанию дата берётся как 'сегодня', а часовой пояс определяется параметром 	imezone или локальными настройками портала."
+            "РџРѕР»СѓС‡Р°РµС‚ РєР°Р»РµРЅРґР°СЂРЅС‹Рµ СЃРѕР±С‹С‚РёСЏ Р·Р° СѓРєР°Р·Р°РЅРЅС‹Р№ РґРµРЅСЊ РґР»СЏ РІС‹Р±СЂР°РЅРЅС‹С… СЃРѕС‚СЂСѓРґРЅРёРєРѕРІ РёР»Рё РІСЃРµС… Р°РєС‚РёРІРЅС‹С…, РµСЃР»Рё user_ids РЅРµ Р·Р°РґР°РЅС‹."
+            " РџРѕ СѓРјРѕР»С‡Р°РЅРёСЋ РґР°С‚Р° Р±РµСЂС‘С‚СЃСЏ РєР°Рє 'СЃРµРіРѕРґРЅСЏ', Р° С‡Р°СЃРѕРІРѕР№ РїРѕСЏСЃ РѕРїСЂРµРґРµР»СЏРµС‚СЃСЏ РїР°СЂР°РјРµС‚СЂРѕРј 	imezone РёР»Рё Р»РѕРєР°Р»СЊРЅС‹РјРё РЅР°СЃС‚СЂРѕР№РєР°РјРё РїРѕСЂС‚Р°Р»Р°."
         ),
         args_schema=CalendarEventsForUsersArgs,
         infer_schema=False,
     )
+
+@dataclass
+class ToolPreparation:
+    """Container with prepared StructuredTool objects and summary metadata."""
+    tools: List[StructuredTool]
+    capabilities: str
+    base_count: int
+    extra_count: int
 def build_additional_tools(client: Bitrix24Client) -> List[StructuredTool]:
     return [_build_calendar_events_tool(client)]
+def prepare_tools(client: Bitrix24Client) -> ToolPreparation:
+    """
+    Build the complete set of StructuredTool objects for the provided client and
+    return both the tools and a short, human-readable summary of their
+    capabilities.
+    """
+    toolset = BitrixToolset(client)
+    base_tools = toolset.build_tools()
+    extra_tools = build_additional_tools(client)
+    all_tools = base_tools + extra_tools
+    total_tools = len(all_tools)
+    logger.debug(
+        "Collected Bitrix24 toolset: base=%s extra=%s total=%s",
+        len(base_tools),
+        len(extra_tools),
+        total_tools,
+    )
+    if not all_tools:
+        raise RuntimeError("Bitrix24Client does not expose any public methods for tools.")
+    capabilities = _summarize_tool_capabilities(all_tools)
+    logger.debug("Tool capabilities summary:\n%s", capabilities)
+    return ToolPreparation(
+        tools=all_tools,
+        capabilities=capabilities,
+        base_count=len(base_tools),
+        extra_count=len(extra_tools),
+    )
 def _summarize_tool_capabilities(tools: Sequence[StructuredTool]) -> str:
     if not tools:
-        return "нет зарегистрированных инструментов"
+        return "РЅРµС‚ Р·Р°СЂРµРіРёСЃС‚СЂРёСЂРѕРІР°РЅРЅС‹С… РёРЅСЃС‚СЂСѓРјРµРЅС‚РѕРІ"
     lines: List[str] = []
     for tool in tools:
         description = (tool.description or "").strip()
@@ -497,22 +533,24 @@ def _get_chat_history(memory: ConversationBufferMemory) -> BaseChatMessageHistor
 class BitrixAgentConfig:
     llm: BaseChatModel
     client: Bitrix24Client
-    ai_name: str = "Bitrix24 ассистент"
+    ai_name: str = "Bitrix24 Р°СЃСЃРёСЃС‚РµРЅС‚"
     memory: ConversationBufferMemory | None = None
     verbose: bool = False
 def build_agent(
     config: BitrixAgentConfig,
     *,
     agent_kwargs: Mapping[str, Any] | None = None,
+    preparation: ToolPreparation | None = None,
 ):
-    toolset = BitrixToolset(config.client)
-    base_tools = toolset.build_tools()
-    extra_tools = build_additional_tools(config.client)
-    all_tools = base_tools + extra_tools
-    logger.debug("Сформирован набор инструментов: base=%s extra=%s total=%s", len(base_tools), len(extra_tools), len(all_tools))
-    if not all_tools:
-        raise RuntimeError("В Bitrix24Client не найдено доступных методов для инструментов.")
-    capabilities = _summarize_tool_capabilities(all_tools)
+    prep = preparation or prepare_tools(config.client)
+    all_tools = list(prep.tools)
+    capabilities = prep.capabilities
+    logger.debug(
+        "Сформирован набор инструментов: base=%s extra=%s total=%s",
+        prep.base_count,
+        prep.extra_count,
+        len(all_tools),
+    )
     logger.debug("Краткое описание возможностей:\n%s", capabilities)
     memory = config.memory or ConversationBufferMemory(memory_key="chat_history", return_messages=True)
     system_prompt = DEFAULT_SYSTEM_PROMPT
@@ -524,8 +562,8 @@ def build_agent(
     if "{capabilities}" in system_prompt:
         system_prompt = system_prompt.replace("{capabilities}", capabilities)
     else:
-        system_prompt = f"{system_prompt}\n\nКраткое описание инструментов:\n{capabilities}"
-    logger.debug("Итоговый системный промпт:\n%s", system_prompt)
+        system_prompt = f"{system_prompt}\n\nРљСЂР°С‚РєРѕРµ РѕРїРёСЃР°РЅРёРµ РёРЅСЃС‚СЂСѓРјРµРЅС‚РѕРІ:\n{capabilities}"
+    logger.debug("РС‚РѕРіРѕРІС‹Р№ СЃРёСЃС‚РµРјРЅС‹Р№ РїСЂРѕРјРїС‚:\n%s", system_prompt)
     agent = create_agent(
         model=config.llm,
         tools=all_tools,
@@ -539,22 +577,22 @@ def build_agent(
             get_session_history=lambda _session_id: chat_history,
             input_messages_key="input",
         )
-        logger.debug("К агенту добавлена поддержка истории диалога.")
+        logger.debug("Рљ Р°РіРµРЅС‚Сѓ РґРѕР±Р°РІР»РµРЅР° РїРѕРґРґРµСЂР¶РєР° РёСЃС‚РѕСЂРёРё РґРёР°Р»РѕРіР°.")
     return agent
 DEFAULT_SYSTEM_PROMPT = textwrap.dedent(
     """
-    Ты — внимательный ассистент по Bitrix24.
-    Основные принципы работы:
-    1. Всегда сначала попытайся выполнить запрос пользователя. Если действие понятно из формулировки, немедленно приступай к его выполнению и не проси перечислить действие ещё раз. Уточняющие вопросы допустимы только тогда, когда без них невозможно завершить задачу или данные противоречат друг другу.
-    2. Если запрос содержит несколько действий, выполняй их последовательно или чётко объясняй, как пользователь может разделить их на шаги.
-    3. Активно используй инструменты Bitrix24: при нехватке данных попробуй получить их сам (например, `user.get` для поиска ID сотрудника, `tasks.task.list` для задач, `crm.*` для сущностей CRM).
-    4. Преобразовывай естественные описания параметров в данные для API. Когда пользователь называет имя, компанию или дату, постарайся подобрать нужное значение через доступные методы поиска и только в крайнем случае проси уточнения.
-    5. В ответе удерживайся в пределах 6–8 предложений или пунктов, уделяя основное внимание сделанным действиям и найденной информации.
-    6. Сообщай, какие шаги ты предпринял и к каким результатам пришёл. Если выполнить запрос не получилось, честно объясни причину и предложи варианты, что сделать дальше.
-    7. Если пользователь повторно формулирует задачу после твоего вопроса, считай, что все необходимые данные уже есть, и приступай к выполнению без дополнительных уточнений.
-    8. Для запросов вида «какие события/встречи ...» используй инструмент `calendar_events_for_users`: `date` = сегодня (если не указано иначе), `user_ids` — список сотрудников из запроса, `include_inactive` = `False`, `timezone` — стандартный для портала. Затем коротко опиши найденные события.
-    9. Не отвечай шаблоном «Что нужно сделать в Bitrix24?». Вместо этого пытайся выполнить запрос, а если это невозможно — сразу поясняй причину.
-    Список доступных действий:
+    РўС‹ вЂ” РІРЅРёРјР°С‚РµР»СЊРЅС‹Р№ Р°СЃСЃРёСЃС‚РµРЅС‚ РїРѕ Bitrix24.
+    РћСЃРЅРѕРІРЅС‹Рµ РїСЂРёРЅС†РёРїС‹ СЂР°Р±РѕС‚С‹:
+    1. Р’СЃРµРіРґР° СЃРЅР°С‡Р°Р»Р° РїРѕРїС‹С‚Р°Р№СЃСЏ РІС‹РїРѕР»РЅРёС‚СЊ Р·Р°РїСЂРѕСЃ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ. Р•СЃР»Рё РґРµР№СЃС‚РІРёРµ РїРѕРЅСЏС‚РЅРѕ РёР· С„РѕСЂРјСѓР»РёСЂРѕРІРєРё, РЅРµРјРµРґР»РµРЅРЅРѕ РїСЂРёСЃС‚СѓРїР°Р№ Рє РµРіРѕ РІС‹РїРѕР»РЅРµРЅРёСЋ Рё РЅРµ РїСЂРѕСЃРё РїРµСЂРµС‡РёСЃР»РёС‚СЊ РґРµР№СЃС‚РІРёРµ РµС‰С‘ СЂР°Р·. РЈС‚РѕС‡РЅСЏСЋС‰РёРµ РІРѕРїСЂРѕСЃС‹ РґРѕРїСѓСЃС‚РёРјС‹ С‚РѕР»СЊРєРѕ С‚РѕРіРґР°, РєРѕРіРґР° Р±РµР· РЅРёС… РЅРµРІРѕР·РјРѕР¶РЅРѕ Р·Р°РІРµСЂС€РёС‚СЊ Р·Р°РґР°С‡Сѓ РёР»Рё РґР°РЅРЅС‹Рµ РїСЂРѕС‚РёРІРѕСЂРµС‡Р°С‚ РґСЂСѓРі РґСЂСѓРіСѓ.
+    2. Р•СЃР»Рё Р·Р°РїСЂРѕСЃ СЃРѕРґРµСЂР¶РёС‚ РЅРµСЃРєРѕР»СЊРєРѕ РґРµР№СЃС‚РІРёР№, РІС‹РїРѕР»РЅСЏР№ РёС… РїРѕСЃР»РµРґРѕРІР°С‚РµР»СЊРЅРѕ РёР»Рё С‡С‘С‚РєРѕ РѕР±СЉСЏСЃРЅСЏР№, РєР°Рє РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ РјРѕР¶РµС‚ СЂР°Р·РґРµР»РёС‚СЊ РёС… РЅР° С€Р°РіРё.
+    3. РђРєС‚РёРІРЅРѕ РёСЃРїРѕР»СЊР·СѓР№ РёРЅСЃС‚СЂСѓРјРµРЅС‚С‹ Bitrix24: РїСЂРё РЅРµС…РІР°С‚РєРµ РґР°РЅРЅС‹С… РїРѕРїСЂРѕР±СѓР№ РїРѕР»СѓС‡РёС‚СЊ РёС… СЃР°Рј (РЅР°РїСЂРёРјРµСЂ, `user.get` РґР»СЏ РїРѕРёСЃРєР° ID СЃРѕС‚СЂСѓРґРЅРёРєР°, `tasks.task.list` РґР»СЏ Р·Р°РґР°С‡, `crm.*` РґР»СЏ СЃСѓС‰РЅРѕСЃС‚РµР№ CRM).
+    4. РџСЂРµРѕР±СЂР°Р·РѕРІС‹РІР°Р№ РµСЃС‚РµСЃС‚РІРµРЅРЅС‹Рµ РѕРїРёСЃР°РЅРёСЏ РїР°СЂР°РјРµС‚СЂРѕРІ РІ РґР°РЅРЅС‹Рµ РґР»СЏ API. РљРѕРіРґР° РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ РЅР°Р·С‹РІР°РµС‚ РёРјСЏ, РєРѕРјРїР°РЅРёСЋ РёР»Рё РґР°С‚Сѓ, РїРѕСЃС‚Р°СЂР°Р№СЃСЏ РїРѕРґРѕР±СЂР°С‚СЊ РЅСѓР¶РЅРѕРµ Р·РЅР°С‡РµРЅРёРµ С‡РµСЂРµР· РґРѕСЃС‚СѓРїРЅС‹Рµ РјРµС‚РѕРґС‹ РїРѕРёСЃРєР° Рё С‚РѕР»СЊРєРѕ РІ РєСЂР°Р№РЅРµРј СЃР»СѓС‡Р°Рµ РїСЂРѕСЃРё СѓС‚РѕС‡РЅРµРЅРёСЏ.
+    5. Р’ РѕС‚РІРµС‚Рµ СѓРґРµСЂР¶РёРІР°Р№СЃСЏ РІ РїСЂРµРґРµР»Р°С… 6вЂ“8 РїСЂРµРґР»РѕР¶РµРЅРёР№ РёР»Рё РїСѓРЅРєС‚РѕРІ, СѓРґРµР»СЏСЏ РѕСЃРЅРѕРІРЅРѕРµ РІРЅРёРјР°РЅРёРµ СЃРґРµР»Р°РЅРЅС‹Рј РґРµР№СЃС‚РІРёСЏРј Рё РЅР°Р№РґРµРЅРЅРѕР№ РёРЅС„РѕСЂРјР°С†РёРё.
+    6. РЎРѕРѕР±С‰Р°Р№, РєР°РєРёРµ С€Р°РіРё С‚С‹ РїСЂРµРґРїСЂРёРЅСЏР» Рё Рє РєР°РєРёРј СЂРµР·СѓР»СЊС‚Р°С‚Р°Рј РїСЂРёС€С‘Р». Р•СЃР»Рё РІС‹РїРѕР»РЅРёС‚СЊ Р·Р°РїСЂРѕСЃ РЅРµ РїРѕР»СѓС‡РёР»РѕСЃСЊ, С‡РµСЃС‚РЅРѕ РѕР±СЉСЏСЃРЅРё РїСЂРёС‡РёРЅСѓ Рё РїСЂРµРґР»РѕР¶Рё РІР°СЂРёР°РЅС‚С‹, С‡С‚Рѕ СЃРґРµР»Р°С‚СЊ РґР°Р»СЊС€Рµ.
+    7. Р•СЃР»Рё РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ РїРѕРІС‚РѕСЂРЅРѕ С„РѕСЂРјСѓР»РёСЂСѓРµС‚ Р·Р°РґР°С‡Сѓ РїРѕСЃР»Рµ С‚РІРѕРµРіРѕ РІРѕРїСЂРѕСЃР°, СЃС‡РёС‚Р°Р№, С‡С‚Рѕ РІСЃРµ РЅРµРѕР±С…РѕРґРёРјС‹Рµ РґР°РЅРЅС‹Рµ СѓР¶Рµ РµСЃС‚СЊ, Рё РїСЂРёСЃС‚СѓРїР°Р№ Рє РІС‹РїРѕР»РЅРµРЅРёСЋ Р±РµР· РґРѕРїРѕР»РЅРёС‚РµР»СЊРЅС‹С… СѓС‚РѕС‡РЅРµРЅРёР№.
+    8. Р”Р»СЏ Р·Р°РїСЂРѕСЃРѕРІ РІРёРґР° В«РєР°РєРёРµ СЃРѕР±С‹С‚РёСЏ/РІСЃС‚СЂРµС‡Рё ...В» РёСЃРїРѕР»СЊР·СѓР№ РёРЅСЃС‚СЂСѓРјРµРЅС‚ `calendar_events_for_users`: `date` = СЃРµРіРѕРґРЅСЏ (РµСЃР»Рё РЅРµ СѓРєР°Р·Р°РЅРѕ РёРЅР°С‡Рµ), `user_ids` вЂ” СЃРїРёСЃРѕРє СЃРѕС‚СЂСѓРґРЅРёРєРѕРІ РёР· Р·Р°РїСЂРѕСЃР°, `include_inactive` = `False`, `timezone` вЂ” СЃС‚Р°РЅРґР°СЂС‚РЅС‹Р№ РґР»СЏ РїРѕСЂС‚Р°Р»Р°. Р—Р°С‚РµРј РєРѕСЂРѕС‚РєРѕ РѕРїРёС€Рё РЅР°Р№РґРµРЅРЅС‹Рµ СЃРѕР±С‹С‚РёСЏ.
+    9. РќРµ РѕС‚РІРµС‡Р°Р№ С€Р°Р±Р»РѕРЅРѕРј В«Р§С‚Рѕ РЅСѓР¶РЅРѕ СЃРґРµР»Р°С‚СЊ РІ Bitrix24?В». Р’РјРµСЃС‚Рѕ СЌС‚РѕРіРѕ РїС‹С‚Р°Р№СЃСЏ РІС‹РїРѕР»РЅРёС‚СЊ Р·Р°РїСЂРѕСЃ, Р° РµСЃР»Рё СЌС‚Рѕ РЅРµРІРѕР·РјРѕР¶РЅРѕ вЂ” СЃСЂР°Р·Сѓ РїРѕСЏСЃРЅСЏР№ РїСЂРёС‡РёРЅСѓ.
+    РЎРїРёСЃРѕРє РґРѕСЃС‚СѓРїРЅС‹С… РґРµР№СЃС‚РІРёР№:
     {capabilities}
     """
 ).strip()
