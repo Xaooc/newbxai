@@ -3,7 +3,13 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
+
+from dotenv import load_dotenv
+
+
+DEFAULT_DOTENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 
 
 @dataclass(frozen=True)
@@ -19,6 +25,11 @@ class Settings:
     @staticmethod
     def from_env() -> "Settings":
         """Собирает настройки из переменных окружения."""
+
+        # Загружаем переменные окружения из файла .env, если он существует.
+        load_dotenv()
+        if DEFAULT_DOTENV_PATH.exists():
+            load_dotenv(DEFAULT_DOTENV_PATH)
 
         bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
         openai_api_key = os.getenv("OPENAI_API_KEY")
