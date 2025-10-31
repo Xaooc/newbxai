@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from hashlib import md5
-from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from src.bitrix_client.client import BitrixClientError, call_bitrix
 from src.logging.logger import InteractionLogger
@@ -18,6 +19,41 @@ from src.orchestrator.model_client import (
 from src.state.manager import AgentStateManager, AgentState
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class BatchCommandInfo:
+    """Описание подзапроса в batch."""
+
+    key: str
+    method: str
+    query: str
+    arguments: Dict[str, str]
+
+    def payload_fields(self) -> Set[str]:
+        """Возвращает множество полей, затронутых в параметрах подзапроса."""
+
+        fields: Set[str] = set()
+        for raw_key in self.arguments.keys():
+            upper_key = raw_key.upper()
+            fields.add(upper_key)
+            bracket_field = self._extract_bracket_field(raw_key)
+            if bracket_field:
+                fields.add(bracket_field.upper())
+        return fields
+
+    def get_argument(self, name: str) -> Optional[str]:
+        """Возвращает значение параметра по имени (если присутствует)."""
+
+        return self.arguments.get(name)
+
+    @staticmethod
+    def _extract_bracket_field(raw_key: str) -> Optional[str]:
+        """Извлекает имя поля из последней пары квадратных скобок."""
+
+        if "[" not in raw_key or not raw_key.endswith("]"):
+            return None
+        return raw_key[raw_key.rfind("[") + 1 : -1] or None
 
 
 READ_METHODS = {
@@ -31,6 +67,7 @@ READ_METHODS = {
     "crm.deal.get",
     "crm.activity.list",
     "tasks.task.list",
+    "event.get",
 }
 
 SAFE_CREATE_METHODS = {
@@ -45,13 +82,17 @@ SAFE_CREATE_METHODS = {
 UPDATE_METHODS = {
     "crm.deal.update",
     "tasks.task.update",
+    "event.bind",
+    "event.unbind",
 }
 
-ALL_ALLOWED_METHODS = READ_METHODS | SAFE_CREATE_METHODS | UPDATE_METHODS
+EVENT_METHODS = {"event.bind", "event.get", "event.unbind"}
+BATCH_METHODS = {"batch"}
+ALL_ALLOWED_METHODS = READ_METHODS | SAFE_CREATE_METHODS | UPDATE_METHODS | BATCH_METHODS
 
 ALLOWED_METHODS_BY_MODE = {
     "shadow": set(),
-    "canary": READ_METHODS | SAFE_CREATE_METHODS,
+    "canary": READ_METHODS | SAFE_CREATE_METHODS | BATCH_METHODS,
     "full": ALL_ALLOWED_METHODS,
 }
 
@@ -62,6 +103,8 @@ RISKY_FIELDS_BY_METHOD = {
     "tasks.task.add": {"fields": {"RESPONSIBLE_ID", "DEADLINE"}},
     "tasks.task.update": {"fields": {"RESPONSIBLE_ID", "DEADLINE"}},
 }
+
+ALWAYS_CONFIRM_METHODS = {"event.bind", "event.unbind"}
 
 DEFAULT_SYSTEM_PROMPT = (
     "Ты — AI-менеджер Bitrix24. Работай строго по инструкциям.\n"
@@ -75,9 +118,15 @@ DEFAULT_SYSTEM_PROMPT = (
     "Разрешённые методы: user.current, user.get, crm.contact.list, crm.contact.get, crm.company.list,"
     " crm.company.get, crm.deal.list, crm.deal.get, crm.deal.add, crm.deal.update, crm.activity.list,"
     " crm.activity.add, crm.timeline.comment.add, tasks.task.add, tasks.task.update, tasks.task.list,"
-    " task.commentitem.add, task.checklistitem.add. Запрещено использовать любые иные методы.\n"
+    " task.commentitem.add, task.checklistitem.add, batch, event.bind, event.get, event.unbind. Запрещено использовать любые иные методы.\n"
     "Перед изменением сумм, стадий, ответственных, дедлайнов указывай requires_confirmation=true и жди подтверждения."
 )
+
+
+def _utc_iso_z() -> str:
+    """Возвращает временную метку UTC в формате ISO 8601 с суффиксом Z."""
+
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 @dataclass
@@ -158,7 +207,7 @@ class Orchestrator:
                     record.update(
                         {
                             "status": "denied",
-                            "denied_at": datetime.utcnow().isoformat() + "Z",
+                            "denied_at": _utc_iso_z(),
                             "action": action,
                             "reason": denial_reason,
                             "description": denial_reason,
@@ -174,7 +223,7 @@ class Orchestrator:
                     pending_actions.append(action)
                     continue
 
-                if not self._is_action_allowed(method):
+                if not self._is_action_allowed(method, action):
                     errors.append(f"Метод {method} запрещён в режиме {self.settings.mode}")
                     pending_actions.append(action)
                     continue
@@ -199,7 +248,7 @@ class Orchestrator:
                 if confirmation_key:
                     record = state.confirmations.get(confirmation_key, {})
                     record["status"] = "approved"
-                    record["approved_at"] = datetime.utcnow().isoformat() + "Z"
+                    record["approved_at"] = _utc_iso_z()
                     record["reason"] = confirmation_reason
                     record["description"] = confirmation_reason
                     state.confirmations[confirmation_key] = record
@@ -310,10 +359,23 @@ class Orchestrator:
             ),
         }
 
-    def _is_action_allowed(self, method: str) -> bool:
+    def _is_action_allowed(self, method: str, action: Optional[Dict[str, Any]] = None) -> bool:
         """Проверяет, разрешён ли метод в текущем режиме безопасности."""
 
         allowed = ALLOWED_METHODS_BY_MODE.get(self.settings.mode, set())
+        if method == "batch":
+            if method not in allowed:
+                return False
+            try:
+                commands = self._extract_batch_commands(action or {})
+            except ValueError:
+                return False
+            for command in commands:
+                if not command.method or command.method == "batch":
+                    return False
+                if command.method not in ALLOWED_METHODS_BY_MODE.get(self.settings.mode, set()):
+                    return False
+            return True
         return method in allowed
 
     def _check_confirmation_needed(self, state: AgentState, action: Dict[str, Any]) -> Tuple[bool, Optional[str], Optional[str]]:
@@ -325,10 +387,26 @@ class Orchestrator:
         confirmed_flag = action.get("confirmed", False)
         reason = action.get("confirmation_reason")
 
-        risky_fields = RISKY_FIELDS_BY_METHOD.get(method, {}).get("fields", set())
-        payload_fields: set[str] = set()
-        if isinstance(params, dict):
+        if method in ALWAYS_CONFIRM_METHODS:
+            explicit_request = True
+            reason = reason or f"Управление подпиской через {method}"
+
+        batch_commands: List[BatchCommandInfo] = []
+        if method == "batch":
+            try:
+                batch_commands = self._extract_batch_commands(action)
+            except ValueError as exc:
+                return True, None, f"Некорректный пакетный вызов: {exc}"
+            batch_requires_confirmation, batch_reason = self._evaluate_batch_confirmation(batch_commands)
+            if batch_requires_confirmation:
+                explicit_request = True
+                reason = reason or batch_reason
+            risky_fields: Set[str] = set()
+            payload_fields: Set[str] = set()
+        else:
+            risky_fields = RISKY_FIELDS_BY_METHOD.get(method, {}).get("fields", set())
             fields_payload = params.get("fields") if isinstance(params.get("fields"), dict) else params
+            payload_fields = set()
             if isinstance(fields_payload, dict):
                 payload_fields = {key.upper() for key in fields_payload.keys()}
 
@@ -341,16 +419,19 @@ class Orchestrator:
         key = self._build_confirmation_key(method, params)
         record = state.confirmations.get(key)
 
+        confirmation_reason = reason
+        if not confirmation_reason:
+            confirmation_reason = self._build_confirmation_reason(method, params, risky_fields)
+
         if confirmed_flag or (record and record.get("status") == "approved"):
-            confirmation_text = reason or self._build_confirmation_reason(method, params, risky_fields)
             updated_record = record or {}
             updated_record.update(
                 {
                     "status": "approved",
-                    "approved_at": datetime.utcnow().isoformat() + "Z",
+                    "approved_at": _utc_iso_z(),
                     "action": action,
-                    "reason": confirmation_text,
-                    "description": confirmation_text,
+                    "reason": confirmation_reason,
+                    "description": confirmation_reason,
                 }
             )
             state.confirmations[key] = updated_record
@@ -359,15 +440,72 @@ class Orchestrator:
         if record and record.get("status") == "denied":
             return True, key, record.get("reason", "операция ранее отклонена")
 
-        confirmation_reason = reason or self._build_confirmation_reason(method, params, risky_fields)
         state.confirmations[key] = {
             "status": "requested",
-            "requested_at": datetime.utcnow().isoformat() + "Z",
+            "requested_at": _utc_iso_z(),
             "action": action,
             "reason": confirmation_reason,
             "description": confirmation_reason,
         }
         return True, key, confirmation_reason
+    def _extract_batch_commands(self, action: Dict[str, Any]) -> List[BatchCommandInfo]:
+        """Разбирает шаг batch в список подзапросов."""
+
+        params = (action.get("params") or {}) if isinstance(action, dict) else {}
+        cmd_payload = params.get("cmd")
+        if cmd_payload is None:
+            raise ValueError("Отсутствует параметр cmd для batch")
+
+        if isinstance(cmd_payload, dict):
+            items = list(cmd_payload.items())
+        elif isinstance(cmd_payload, list):
+            items = [(str(idx), value) for idx, value in enumerate(cmd_payload)]
+        else:
+            raise ValueError("Параметр cmd должен быть словарём или списком строк")
+
+        commands: List[BatchCommandInfo] = []
+        for key, raw in items:
+            if not isinstance(raw, str):
+                raise ValueError("Каждый подзапрос batch должен быть строкой")
+            method_part, query = (raw.split("?", 1) + [""])[:2]
+            method = method_part.strip()
+            parsed_args = {
+                arg_key: values[-1] if values else ""
+                for arg_key, values in parse_qs(query, keep_blank_values=True).items()
+            }
+            commands.append(BatchCommandInfo(str(key), method, query, parsed_args))
+        return commands
+
+    def _evaluate_batch_confirmation(self, commands: List[BatchCommandInfo]) -> Tuple[bool, str]:
+        """Определяет, нужен ли запрос подтверждения для пакетного вызова."""
+
+        reasons: List[str] = []
+        confirm = False
+        for command in commands:
+            sub_method = command.method
+            if not sub_method:
+                confirm = True
+                reasons.append("не удалось определить метод подзапроса")
+                continue
+            if sub_method in ALWAYS_CONFIRM_METHODS:
+                confirm = True
+                reasons.append(f"управление подпиской через {sub_method}")
+                continue
+            risky_fields = RISKY_FIELDS_BY_METHOD.get(sub_method, {}).get("fields", set())
+            impacted_fields = command.payload_fields() & risky_fields
+            if impacted_fields:
+                confirm = True
+                field_list = ", ".join(sorted(impacted_fields))
+                reasons.append(f"изменение полей {field_list} через {sub_method}")
+                continue
+            if sub_method in UPDATE_METHODS and sub_method not in RISKY_FIELDS_BY_METHOD:
+                confirm = True
+                reasons.append(f"использование метода {sub_method} внутри batch")
+        if confirm:
+            reason_text = "; ".join(dict.fromkeys(reasons)) if reasons else "Пакетный вызов содержит критичные изменения"
+        else:
+            reason_text = ""
+        return confirm, reason_text
 
     def _build_confirmation_key(self, method: str, params: Dict[str, Any]) -> str:
         """Формирует ключ подтверждения на основе метода и параметров."""
@@ -500,15 +638,79 @@ class Orchestrator:
                     "Создана активность CRM",
                     {"activity_id": activity_id, "owner_id": owner_id},
                 )
+        elif method == "event.bind":
+            if result.get("result") is True:
+                event_code = (action.get("params") or {}).get("event")
+                handler_url = (action.get("params") or {}).get("handler")
+                binding = {"event": event_code, "handler": handler_url}
+                if event_code and handler_url and binding not in state.event_bindings:
+                    state.event_bindings.append(binding)
+                self._append_done_entry(
+                    state,
+                    "Подписка на событие обновлена",
+                    {"event": event_code, "handler": handler_url},
+                )
+        elif method == "event.unbind":
+            if result.get("result") is True:
+                event_code = (action.get("params") or {}).get("event")
+                handler_url = (action.get("params") or {}).get("handler")
+                if event_code and handler_url:
+                    state.event_bindings = [
+                        item
+                        for item in state.event_bindings
+                        if not (item.get("event") == event_code and item.get("handler") == handler_url)
+                    ]
+                self._append_done_entry(
+                    state,
+                    "Подписка на событие удалена",
+                    {"event": event_code, "handler": handler_url},
+                )
+        elif method == "event.get":
+            bindings = result.get("result")
+            if isinstance(bindings, dict) and "result" in bindings:
+                bindings = bindings["result"]
+            if isinstance(bindings, list):
+                state.event_bindings = [
+                    {"event": item.get("event"), "handler": item.get("handler")}
+                    for item in bindings
+                    if isinstance(item, dict)
+                ]
+                self._append_done_entry(
+                    state,
+                    "Получен список подписок",
+                    {"count": len(state.event_bindings)},
+                )
+        elif method == "batch":
+            try:
+                commands = self._extract_batch_commands(action)
+            except ValueError:
+                commands = []
+            summary = {"commands": [{"key": cmd.key, "method": cmd.method} for cmd in commands]}
+            self._append_done_entry(state, "Выполнен пакетный вызов batch", summary)
+            batch_result = (result.get("result") or {}).get("result") if isinstance(result, dict) else None
+            if isinstance(batch_result, dict):
+                for command in commands:
+                    sub_result = batch_result.get(command.key)
+                    if command.method == "event.bind" and sub_result is True:
+                        faux_action = {"method": "event.bind", "params": {"event": command.get_argument("event"), "handler": command.get_argument("handler")}}
+                        self._update_state_from_action(state, faux_action, {"result": True})
+                    elif command.method == "event.unbind" and sub_result is True:
+                        faux_action = {"method": "event.unbind", "params": {"event": command.get_argument("event"), "handler": command.get_argument("handler")}}
+                        self._update_state_from_action(state, faux_action, {"result": True})
+                    elif command.method == "event.get":
+                        data = sub_result
+                        if isinstance(data, dict) and "result" in data:
+                            data = data["result"]
+                        faux_action = {"method": "event.get", "params": {}}
+                        self._update_state_from_action(state, faux_action, {"result": data})
 
         self._remove_action_from_plan(state, action)
-
     def _append_done_entry(self, state: AgentState, description: str, object_ids: Dict[str, Any]) -> None:
         """Добавляет запись об успешном действии в историю."""
 
         state.done.append(
             {
-                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "timestamp": _utc_iso_z(),
                 "description": description,
                 "object_ids": object_ids,
             }
