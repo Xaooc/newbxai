@@ -28,6 +28,7 @@ class AgentState:
     )
     next_planned_actions: List[Dict[str, Any]] = field(default_factory=list)
     confirmations: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    event_bindings: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """Преобразует состояние в словарь для сериализации."""
@@ -39,6 +40,7 @@ class AgentState:
             "objects": self.objects,
             "next_planned_actions": self.next_planned_actions,
             "confirmations": self.confirmations,
+            "event_bindings": self.event_bindings,
         }
 
     @classmethod
@@ -60,6 +62,7 @@ class AgentState:
             ),
             next_planned_actions=list(data.get("next_planned_actions", [])),
             confirmations=dict(data.get("confirmations", {})),
+            event_bindings=list(data.get("event_bindings", [])),
         )
 
 
