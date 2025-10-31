@@ -111,6 +111,96 @@ RISKY_FIELDS_BY_METHOD = {
 
 ALWAYS_CONFIRM_METHODS = {"event.bind", "event.unbind"}
 
+METHOD_PARAMETER_REQUIREMENTS = {
+    "crm.deal.add": {
+        "required": [("fields",), ("fields", ("TITLE", "title"))],
+        "dict_fields": [("fields",)],
+        "non_empty": [("fields", ("TITLE", "title"))],
+    },
+    "crm.deal.update": {
+        "required": [(("id", "ID"),), ("fields",)],
+        "dict_fields": [("fields",)],
+        "non_empty": [("fields",)],
+    },
+    "crm.deal.get": {
+        "required": [(("id", "ID"),)],
+    },
+    "crm.deal.category.stage.list": {
+        "required": [(("id", "ID", "categoryId", "CATEGORY_ID"),)],
+    },
+    "crm.status.list": {
+        "required": [("filter",), ("filter", ("ENTITY_ID", "entity_id"))],
+        "dict_fields": [("filter",)],
+    },
+    "crm.activity.list": {
+        "required": [("filter",), ("filter", ("OWNER_TYPE_ID", "owner_type_id"))],
+        "dict_fields": [("filter",)],
+    },
+    "crm.activity.add": {
+        "required": [
+            ("fields",),
+            ("fields", ("OWNER_TYPE_ID", "owner_type_id")),
+            ("fields", ("OWNER_ID", "owner_id")),
+            ("fields", ("TYPE_ID", "type_id")),
+            ("fields", ("SUBJECT", "subject")),
+        ],
+        "dict_fields": [("fields",)],
+        "non_empty": [("fields", ("SUBJECT", "subject"))],
+    },
+    "crm.timeline.comment.add": {
+        "required": [
+            ("fields",),
+            ("fields", ("ENTITY_ID", "entity_id")),
+            ("fields", ("ENTITY_TYPE", "entity_type")),
+            ("fields", ("COMMENT", "comment")),
+        ],
+        "dict_fields": [("fields",)],
+        "non_empty": [("fields", ("COMMENT", "comment"))],
+    },
+    "crm.contact.get": {
+        "required": [(("id", "ID"),)],
+    },
+    "crm.company.get": {
+        "required": [(("id", "ID"),)],
+    },
+    "tasks.task.add": {
+        "required": [
+            ("fields",),
+            ("fields", ("TITLE", "title")),
+            ("fields", ("DESCRIPTION", "description")),
+            ("fields", ("RESPONSIBLE_ID", "responsible_id")),
+        ],
+        "dict_fields": [("fields",)],
+        "non_empty": [
+            ("fields", ("TITLE", "title")),
+            ("fields", ("DESCRIPTION", "description")),
+        ],
+    },
+    "tasks.task.update": {
+        "required": [(("taskId", "TASK_ID", "id", "ID"),), ("fields",)],
+        "dict_fields": [("fields",)],
+        "non_empty": [("fields",)],
+    },
+    "task.commentitem.add": {
+        "required": [(("taskId", "TASK_ID"),), ("fields",), ("fields", ("POST_MESSAGE", "post_message"))],
+        "dict_fields": [("fields",)],
+        "non_empty": [("fields", ("POST_MESSAGE", "post_message"))],
+    },
+    "task.checklistitem.add": {
+        "required": [(("taskId", "TASK_ID"),), ("fields",), ("fields", ("TITLE", "title"))],
+        "dict_fields": [("fields",)],
+        "non_empty": [("fields", ("TITLE", "title"))],
+    },
+    "event.bind": {
+        "required": [(("event", "EVENT"),), (("handler", "HANDLER"),)],
+        "non_empty": [(("event", "EVENT"),), (("handler", "HANDLER"),)],
+    },
+    "event.unbind": {
+        "required": [(("event", "EVENT"),), (("handler", "HANDLER"),)],
+        "non_empty": [(("event", "EVENT"),), (("handler", "HANDLER"),)],
+    },
+}
+
 DEFAULT_SYSTEM_PROMPT = (
     "Ты — AI-менеджер Bitrix24. Работай строго по инструкциям.\n"
     "Всегда отвечай в формате:\n"
@@ -194,9 +284,20 @@ class Orchestrator:
         else:
             for action in actions:
                 method = action.get("method")
-                params = action.get("params") or {}
+                raw_params = action.get("params")
+                if raw_params is None:
+                    params = {}
+                elif isinstance(raw_params, dict):
+                    params = raw_params
+                else:
+                    errors.append(
+                        f"Шаг {method or 'без имени'} содержит некорректный формат params (ожидается объект)."
+                    )
+                    pending_actions.append(action)
+                    continue
+
                 comment = action.get("comment", "")
-                http_method = action.get("http_method", "POST")
+                http_method = action.get("http_method")
                 decision = (action.get("confirmation_decision") or "").strip().lower()
 
                 if decision == "approve" and not action.get("confirmed"):
@@ -233,6 +334,14 @@ class Orchestrator:
                     errors.append(f"Метод {method} запрещён в режиме {self.settings.mode}")
                     pending_actions.append(action)
                     continue
+
+                validation_errors = self._validate_action_params(method, params)
+                if validation_errors:
+                    errors.extend(validation_errors)
+                    pending_actions.append(action)
+                    continue
+
+                http_method = (http_method or self._default_http_method(method)).upper()
 
                 confirmation_needed, confirmation_key, confirmation_reason = self._check_confirmation_needed(
                     state, action
@@ -364,6 +473,96 @@ class Orchestrator:
                 f"{reason}. Я зафиксировал запрос и готов повторить попытку позже."
             ),
         }
+
+    def _default_http_method(self, method: str) -> str:
+        """Возвращает HTTP-метод по умолчанию для вызова Bitrix."""
+
+        if method in READ_METHODS:
+            return "GET"
+        return "POST"
+
+    def _validate_action_params(self, method: str, params: Dict[str, Any]) -> List[str]:
+        """Проверяет наличие обязательных параметров для метода."""
+
+        spec = METHOD_PARAMETER_REQUIREMENTS.get(method)
+        if not spec:
+            return []
+
+        errors: List[str] = []
+
+        def get_value(path: Tuple[Any, ...]) -> Any:
+            current: Any = params
+            for segment in path:
+                if isinstance(segment, tuple):
+                    options = tuple(segment)
+                else:
+                    options = (str(segment),)
+                if not isinstance(current, dict):
+                    return None
+                found = False
+                for option in options:
+                    if option in current:
+                        current = current[option]
+                        found = True
+                        break
+                if not found:
+                    return None
+            return current
+
+        for path in spec.get("required", []):
+            value = get_value(path)
+            if not self._is_value_present(value):
+                errors.append(
+                    f"Метод {method} требует параметр {self._path_to_str(path)}"
+                )
+
+        for path in spec.get("dict_fields", []):
+            value = get_value(path)
+            if value is None:
+                continue
+            if not isinstance(value, dict):
+                errors.append(
+                    f"Метод {method} ожидает объект (словарь) в {self._path_to_str(path)}"
+                )
+
+        for path in spec.get("non_empty", []):
+            value = get_value(path)
+            if value is None:
+                continue
+            if not self._is_value_present(value):
+                errors.append(
+                    f"Метод {method} требует непустое значение {self._path_to_str(path)}"
+                )
+
+        return errors
+
+    @staticmethod
+    def _path_to_str(path: Tuple[Any, ...]) -> str:
+        """Формирует строковое представление пути параметра."""
+
+        parts: List[str] = []
+        for segment in path:
+            if isinstance(segment, tuple):
+                parts.append("/".join(str(item) for item in segment))
+            else:
+                parts.append(str(segment))
+        return ".".join(parts)
+
+    @staticmethod
+    def _is_value_present(value: Any) -> bool:
+        """Проверяет, заполнено ли значение."""
+
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, bool):
+            return True
+        if isinstance(value, (int, float)):
+            return True
+        if isinstance(value, (list, dict, set, tuple)):
+            return bool(value)
+        return True
 
     def _is_action_allowed(self, method: str, action: Optional[Dict[str, Any]] = None) -> bool:
         """Проверяет, разрешён ли метод в текущем режиме безопасности."""
@@ -569,6 +768,13 @@ class Orchestrator:
                 if isinstance(result, dict) and result.get("total") is not None:
                     payload["total"] = result.get("total")
                 self._append_done_entry(state, "Получен список сделок", payload)
+        elif method == "crm.contact.list":
+            contacts = result.get("result") if isinstance(result, dict) else None
+            if isinstance(contacts, list):
+                payload = {"count": len(contacts)}
+                if isinstance(result, dict) and result.get("total") is not None:
+                    payload["total"] = result.get("total")
+                self._append_done_entry(state, "Получен список контактов", payload)
         elif method == "crm.deal.get":
             deal_data = result.get("result") if isinstance(result, dict) else None
             if isinstance(deal_data, dict):
@@ -598,7 +804,13 @@ class Orchestrator:
         elif method == "crm.deal.category.stage.list":
             stages = result.get("result") if isinstance(result, dict) else None
             if isinstance(stages, list):
-                category_id = (action.get("params") or {}).get("id") or (action.get("params") or {}).get("categoryId")
+                params_payload = action.get("params") or {}
+                category_id = (
+                    params_payload.get("id")
+                    or params_payload.get("ID")
+                    or params_payload.get("categoryId")
+                    or params_payload.get("CATEGORY_ID")
+                )
                 payload = {"count": len(stages)}
                 if category_id is not None:
                     payload["category_id"] = category_id
@@ -628,6 +840,25 @@ class Orchestrator:
                             "contact_id": contact_data.get("ID"),
                             "company_id": contact_data.get("COMPANY_ID"),
                         },
+                    )
+        elif method == "crm.company.list":
+            companies = result.get("result") if isinstance(result, dict) else None
+            if isinstance(companies, list):
+                payload = {"count": len(companies)}
+                if isinstance(result, dict) and result.get("total") is not None:
+                    payload["total"] = result.get("total")
+                self._append_done_entry(state, "Получен список компаний", payload)
+        elif method == "crm.company.get":
+            company_data = result.get("result") if isinstance(result, dict) else None
+            if isinstance(company_data, dict):
+                company_id = company_data.get("ID")
+                if company_id:
+                    state.objects["current_company_id"] = company_id
+                if company_id:
+                    self._append_done_entry(
+                        state,
+                        "Получены данные компании",
+                        {"company_id": company_id},
                     )
         elif method == "crm.timeline.comment.add":
             comment_id = result.get("result")
@@ -679,6 +910,14 @@ class Orchestrator:
                 if total is not None:
                     payload["total"] = total
                 self._append_done_entry(state, "Получен список активностей", payload)
+        elif method == "tasks.task.list":
+            tasks_payload = result.get("result") if isinstance(result, dict) else None
+            total = result.get("total") if isinstance(result, dict) else None
+            if isinstance(tasks_payload, list):
+                payload = {"count": len(tasks_payload)}
+                if total is not None:
+                    payload["total"] = total
+                self._append_done_entry(state, "Получен список задач", payload)
         elif method == "event.bind":
             if result.get("result") is True:
                 event_code = (action.get("params") or {}).get("event")
