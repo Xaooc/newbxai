@@ -399,6 +399,129 @@ def test_event_get_updates_state(orchestrator_factory, monkeypatch):
     ]
     assert state.done[-1]["description"] == "Получен список подписок"
 
+
+def test_crm_status_list_updates_done_history(orchestrator_factory, monkeypatch):
+    """Чтение справочника через crm.status.list должно записывать агрегированную статистику."""
+
+    def fake_call(method: str, params: Dict[str, Any], http_method: str = "GET") -> Dict[str, Any]:
+        assert method == "crm.status.list"
+        assert params["filter"]["ENTITY_ID"] == "DEAL_STAGE"
+        return {"result": [{"STATUS_ID": "NEW"}, {"STATUS_ID": "WON"}]}
+
+    monkeypatch.setattr("src.orchestrator.agent.call_bitrix", fake_call)
+
+    orchestrator = orchestrator_factory(
+        "canary",
+        build_model_text(
+            [
+                {
+                    "method": "crm.status.list",
+                    "params": {"filter": {"ENTITY_ID": "DEAL_STAGE"}},
+                    "comment": "Получаем статусы сделок",
+                }
+            ],
+            assistant="Получены статусы",
+        ),
+    )
+
+    reply = orchestrator.process_message("user-status", "Покажи статусы сделок")
+
+    assert "Получены статусы" in reply
+
+    state = orchestrator.state_manager.load_state("user-status")
+    assert len(state.done) == 1
+    done_entry = state.done[0]
+    assert done_entry["description"] == "Получен справочник CRM"
+    assert done_entry["object_ids"] == {"count": 2, "entity_id": "DEAL_STAGE"}
+
+
+def test_crm_deal_category_reads_append_done(orchestrator_factory, monkeypatch):
+    """Запросы crm.deal.category.* должны добавлять записи об объёме данных."""
+
+    responses = iter(
+        [
+            {"result": [{"ID": 1, "NAME": "Основная"}, {"ID": 2, "NAME": "Эксперимент"}]},
+            {"result": [{"STATUS_ID": "NEW"}, {"STATUS_ID": "WON"}, {"STATUS_ID": "LOSE"}]},
+        ]
+    )
+
+    def fake_call(method: str, params: Dict[str, Any], http_method: str = "GET") -> Dict[str, Any]:
+        if method == "crm.deal.category.list":
+            return next(responses)
+        if method == "crm.deal.category.stage.list":
+            assert params["id"] == 2
+            return next(responses)
+        raise AssertionError(f"Неожиданный метод {method}")
+
+    monkeypatch.setattr("src.orchestrator.agent.call_bitrix", fake_call)
+
+    orchestrator = orchestrator_factory(
+        "canary",
+        build_model_text(
+            [
+                {"method": "crm.deal.category.list", "params": {}},
+                {"method": "crm.deal.category.stage.list", "params": {"id": 2}},
+            ],
+            assistant="Данные по направлениям и стадиям получены",
+        ),
+    )
+
+    reply = orchestrator.process_message("user-categories", "Какие направления и стадии есть?")
+
+    assert "Данные по направлениям и стадиям получены" in reply
+
+    state = orchestrator.state_manager.load_state("user-categories")
+    assert len(state.done) == 2
+    categories_entry, stages_entry = state.done
+    assert categories_entry["description"] == "Получен список направлений продаж"
+    assert categories_entry["object_ids"] == {"count": 2}
+    assert stages_entry["description"] == "Получен список стадий сделки"
+    assert stages_entry["object_ids"] == {"count": 3, "category_id": 2}
+
+
+def test_sonet_group_reads_update_done(orchestrator_factory, monkeypatch):
+    """Чтение рабочих групп и их участников должно фиксироваться в истории."""
+
+    responses = iter(
+        [
+            {"result": [{"ID": 10, "NAME": "Проект А"}]},
+            {"result": [{"USER_ID": 42, "ROLE": "A"}, {"USER_ID": 43, "ROLE": "M"}]},
+        ]
+    )
+
+    def fake_call(method: str, params: Dict[str, Any], http_method: str = "GET") -> Dict[str, Any]:
+        if method == "sonet.group.get":
+            return next(responses)
+        if method == "sonet.group.user.get":
+            assert params["GROUP_ID"] == 10
+            return next(responses)
+        raise AssertionError(f"Неожиданный метод {method}")
+
+    monkeypatch.setattr("src.orchestrator.agent.call_bitrix", fake_call)
+
+    orchestrator = orchestrator_factory(
+        "canary",
+        build_model_text(
+            [
+                {"method": "sonet.group.get", "params": {}},
+                {"method": "sonet.group.user.get", "params": {"GROUP_ID": 10}},
+            ],
+            assistant="Информация о группах и участниках подготовлена",
+        ),
+    )
+
+    reply = orchestrator.process_message("user-groups", "Покажи рабочие группы и участников")
+
+    assert "Информация о группах и участниках подготовлена" in reply
+
+    state = orchestrator.state_manager.load_state("user-groups")
+    assert len(state.done) == 2
+    groups_entry, members_entry = state.done
+    assert groups_entry["description"] == "Получен список рабочих групп"
+    assert groups_entry["object_ids"] == {"count": 1}
+    assert members_entry["description"] == "Получен список участников группы"
+    assert members_entry["object_ids"] == {"count": 2, "group_id": 10}
+
 def test_interaction_logger_rotation(tmp_path: Path):
     """Проверяем, что логгер создаёт архивы и ограничивает их количество."""
 
