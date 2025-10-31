@@ -158,9 +158,98 @@ def test_confirmation_required_action_not_executed(orchestrator_factory, monkeyp
 
     state = orchestrator.state_manager.load_state("user-3")
     assert state.next_planned_actions, "Шаг должен остаться в плане"
-    assert state.confirmations, "Должна быть создана запись подтверждения"
+
+
+def test_event_bind_requires_confirmation(orchestrator_factory, monkeypatch):
+    """`event.bind` должен требовать подтверждения и не выполняться без него."""
+
+    called = False
+
+    def fake_call(method: str, params: Dict[str, Any], http_method: str = "POST") -> Dict[str, Any]:
+        nonlocal called
+        called = True
+        return {"result": True}
+
+    monkeypatch.setattr("src.orchestrator.agent.call_bitrix", fake_call)
+
+    action = {
+        "method": "event.bind",
+        "params": {"event": "OnCrmDealAdd", "handler": "https://example.com/hook"},
+        "comment": "Настраиваем вебхук",
+    }
+
+    orchestrator = orchestrator_factory("full", build_model_text([action]))
+
+    reply = orchestrator.process_message("user-4", "Подпиши событие")
+
+    assert "⚠️" in reply
+    assert "Управление подпиской через event.bind" in reply
+    assert called is False, "Без подтверждения вызова Bitrix быть не должно"
+
+    state = orchestrator.state_manager.load_state("user-4")
+    assert state.next_planned_actions == [action]
     confirmation = next(iter(state.confirmations.values()))
     assert confirmation["status"] == "requested"
+
+
+def test_batch_updates_event_bindings_after_confirmation(orchestrator_factory, monkeypatch):
+    """Пакетный вызов с изменением подписок должен обновлять `event_bindings`."""
+
+    captured: List[Dict[str, Any]] = []
+
+    def fake_call(method: str, params: Dict[str, Any], http_method: str = "POST") -> Dict[str, Any]:
+        captured.append({"method": method, "params": params, "http_method": http_method})
+        assert method == "batch"
+        return {
+            "result": {
+                "result": {
+                    "bind": True,
+                    "list": {
+                        "result": [
+                            {
+                                "event": "OnCrmDealAdd",
+                                "handler": "https://example.com/hook",
+                            }
+                        ]
+                    },
+                }
+            }
+        }
+
+    monkeypatch.setattr("src.orchestrator.agent.call_bitrix", fake_call)
+
+    action = {
+        "method": "batch",
+        "params": {
+            "halt": 0,
+            "cmd": {
+                "bind": "event.bind?event=OnCrmDealAdd&handler=https://example.com/hook",
+                "list": "event.get?",
+            },
+        },
+        "requires_confirmation": True,
+        "confirmed": True,
+        "comment": "Обновляем подписки",
+    }
+
+    orchestrator = orchestrator_factory("full", build_model_text([action]))
+
+    reply = orchestrator.process_message("user-5", "Обнови подписки")
+
+    assert "Готово" in reply
+    assert len(captured) == 1
+
+    state = orchestrator.state_manager.load_state("user-5")
+    assert state.event_bindings == [
+        {"event": "OnCrmDealAdd", "handler": "https://example.com/hook"}
+    ]
+    assert state.next_planned_actions == []
+    assert any(entry["description"].startswith("Подписка на событие обновлена") for entry in state.done)
+    assert any(entry["description"].startswith("Получен список подписок") for entry in state.done)
+    assert any(entry["description"].startswith("Выполнен пакетный вызов batch") for entry in state.done)
+    assert state.confirmations, "Должна быть создана запись подтверждения"
+    confirmation = next(iter(state.confirmations.values()))
+    assert confirmation["status"] == "approved"
 
 
 
