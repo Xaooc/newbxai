@@ -69,6 +69,7 @@
 * `in_progress` — текущие шаги, требующие данных или подтверждения.
 * `objects` — последние активные сущности для контекста. Обновляются при успешных вызовах Bitrix.
   * После `crm.deal.get` фиксируются `current_deal_id`, а также `current_contact_id` и `current_company_id`, если они присутствуют в ответе сделки.
+  * После `crm.deal.list`, `crm.deal.category.list`, `crm.deal.category.stage.list`, `crm.status.list`, `sonet.group.get`, `sonet.group.user.get` в историю `done` добавляется запись с количеством элементов, чтобы пользователь видел объём данных.
   * После `crm.contact.get` обновляется `current_contact_id`; при наличии `COMPANY_ID` синхронизируется `current_company_id`.
 * `next_planned_actions` — сохраняет план при режиме shadow или при ожидании подтверждения.
 * `confirmations` — отслеживает статусы запросов подтверждения (`requested`/`approved`/`denied`), временные метки `requested_at`/`approved_at`/`denied_at`, причину и копию шага. При `approved` шаг автоматически повторяется при следующем появлении с `confirmed: true`; при `denied` шаг игнорируется, пока модель не сформирует новый запрос.

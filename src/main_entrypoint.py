@@ -7,7 +7,7 @@ import logging
 import sys
 from pathlib import Path
 
-from src.logging.logger import InteractionLogger
+from src.logging.logger import InteractionLogger, build_interaction_logger
 from src.orchestrator.agent import Orchestrator, OrchestratorSettings
 from src.orchestrator.model_client import ModelClientError, build_default_model_client
 from src.state.manager import AgentStateManager
@@ -19,7 +19,7 @@ def build_orchestrator(mode: str, storage_dir: Path, log_dir: Path) -> Orchestra
     """Создаёт оркестратор с базовыми зависимостями."""
 
     state_manager = AgentStateManager(storage_dir=storage_dir)
-    interaction_logger = InteractionLogger(log_dir=log_dir)
+    interaction_logger = build_interaction_logger(log_dir=log_dir)
     settings = OrchestratorSettings(mode=mode)
 
     model_client = None

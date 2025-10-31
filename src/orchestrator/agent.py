@@ -65,8 +65,13 @@ READ_METHODS = {
     "crm.company.get",
     "crm.deal.list",
     "crm.deal.get",
+    "crm.deal.category.list",
+    "crm.deal.category.stage.list",
+    "crm.status.list",
     "crm.activity.list",
     "tasks.task.list",
+    "sonet.group.get",
+    "sonet.group.user.get",
     "event.get",
 }
 
@@ -116,9 +121,10 @@ DEFAULT_SYSTEM_PROMPT = (
     "ASSISTANT:\n"
     "<ответ пользователю на русском языке>.\n"
     "Разрешённые методы: user.current, user.get, crm.contact.list, crm.contact.get, crm.company.list,"
-    " crm.company.get, crm.deal.list, crm.deal.get, crm.deal.add, crm.deal.update, crm.activity.list,"
-    " crm.activity.add, crm.timeline.comment.add, tasks.task.add, tasks.task.update, tasks.task.list,"
-    " task.commentitem.add, task.checklistitem.add, batch, event.bind, event.get, event.unbind. Запрещено использовать любые иные методы.\n"
+    " crm.company.get, crm.deal.list, crm.deal.get, crm.deal.add, crm.deal.update, crm.deal.category.list,"
+    " crm.deal.category.stage.list, crm.status.list, crm.activity.list, crm.activity.add, crm.timeline.comment.add,"
+    " tasks.task.add, tasks.task.update, tasks.task.list, task.commentitem.add, task.checklistitem.add,"
+    " sonet.group.get, sonet.group.user.get, batch, event.bind, event.get, event.unbind. Запрещено использовать любые иные методы.\n"
     "Перед изменением сумм, стадий, ответственных, дедлайнов указывай requires_confirmation=true и жди подтверждения."
 )
 
@@ -556,6 +562,13 @@ class Orchestrator:
                 if deal_id:
                     state.objects["current_deal_id"] = deal_id
                     self._append_done_entry(state, "Обновлены параметры сделки", {"deal_id": deal_id})
+        elif method == "crm.deal.list":
+            deals = result.get("result") if isinstance(result, dict) else None
+            if isinstance(deals, list):
+                payload = {"count": len(deals)}
+                if isinstance(result, dict) and result.get("total") is not None:
+                    payload["total"] = result.get("total")
+                self._append_done_entry(state, "Получен список сделок", payload)
         elif method == "crm.deal.get":
             deal_data = result.get("result") if isinstance(result, dict) else None
             if isinstance(deal_data, dict):
@@ -578,6 +591,26 @@ class Orchestrator:
                             "company_id": deal_data.get("COMPANY_ID"),
                         },
                     )
+        elif method == "crm.deal.category.list":
+            categories = result.get("result") if isinstance(result, dict) else None
+            if isinstance(categories, list):
+                self._append_done_entry(state, "Получен список направлений продаж", {"count": len(categories)})
+        elif method == "crm.deal.category.stage.list":
+            stages = result.get("result") if isinstance(result, dict) else None
+            if isinstance(stages, list):
+                category_id = (action.get("params") or {}).get("id") or (action.get("params") or {}).get("categoryId")
+                payload = {"count": len(stages)}
+                if category_id is not None:
+                    payload["category_id"] = category_id
+                self._append_done_entry(state, "Получен список стадий сделки", payload)
+        elif method == "crm.status.list":
+            statuses = result.get("result") if isinstance(result, dict) else None
+            if isinstance(statuses, list):
+                entity_id = ((action.get("params") or {}).get("filter") or {}).get("ENTITY_ID")
+                payload = {"count": len(statuses)}
+                if entity_id:
+                    payload["entity_id"] = entity_id
+                self._append_done_entry(state, "Получен справочник CRM", payload)
         elif method == "crm.contact.get":
             contact_data = result.get("result") if isinstance(result, dict) else None
             if isinstance(contact_data, dict):
@@ -638,6 +671,14 @@ class Orchestrator:
                     "Создана активность CRM",
                     {"activity_id": activity_id, "owner_id": owner_id},
                 )
+        elif method == "crm.activity.list":
+            activities = result.get("result") if isinstance(result, dict) else None
+            total = result.get("total") if isinstance(result, dict) else None
+            if isinstance(activities, list):
+                payload = {"count": len(activities)}
+                if total is not None:
+                    payload["total"] = total
+                self._append_done_entry(state, "Получен список активностей", payload)
         elif method == "event.bind":
             if result.get("result") is True:
                 event_code = (action.get("params") or {}).get("event")
@@ -680,6 +721,18 @@ class Orchestrator:
                     "Получен список подписок",
                     {"count": len(state.event_bindings)},
                 )
+        elif method == "sonet.group.get":
+            groups = result.get("result") if isinstance(result, dict) else None
+            if isinstance(groups, list):
+                self._append_done_entry(state, "Получен список рабочих групп", {"count": len(groups)})
+        elif method == "sonet.group.user.get":
+            members = result.get("result") if isinstance(result, dict) else None
+            if isinstance(members, list):
+                group_id = (action.get("params") or {}).get("GROUP_ID")
+                payload = {"count": len(members)}
+                if group_id is not None:
+                    payload["group_id"] = group_id
+                self._append_done_entry(state, "Получен список участников группы", payload)
         elif method == "batch":
             try:
                 commands = self._extract_batch_commands(action)

@@ -9,11 +9,28 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Protocol
 
 import gzip
 
 logger = logging.getLogger(__name__)
+
+
+class ArchiveUploadError(RuntimeError):
+    """Исключение, возникающее при неудачной загрузке архива."""
+
+
+class ArchiveUploader(Protocol):
+    """Протокол для внешних хранилищ архивов логов."""
+
+    def upload(
+        self,
+        archive_path: Path,
+        *,
+        user_id: Optional[str] = None,
+        timestamp: Optional[str] = None,
+    ) -> None:
+        """Передаёт архив во внешнее хранилище."""
 
 
 class InteractionLogger:
@@ -25,12 +42,14 @@ class InteractionLogger:
         *,
         max_bytes: int = 5 * 1024 * 1024,
         max_archives: int = 10,
+        archive_uploader: Optional[ArchiveUploader] = None,
     ) -> None:
         self.log_dir = log_dir
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.max_bytes = max_bytes
         self.max_archives = max_archives
         self._lock = Lock()
+        self._archive_uploader = archive_uploader
 
     def _log_file(self, user_id: str) -> Path:
         sanitized = user_id.replace("/", "_")
@@ -75,7 +94,7 @@ class InteractionLogger:
 
         with self._lock:
             try:
-                self._rotate_if_needed(path)
+                self._rotate_if_needed(user_id, path)
                 with path.open("a", encoding="utf-8") as fh:
                     fh.write(serialized)
                 logger.debug(
@@ -89,18 +108,21 @@ class InteractionLogger:
                     extra={"user_id": user_id, "type": record.get("type")},
                 )
 
-    def _rotate_if_needed(self, path: Path) -> None:
+    def _rotate_if_needed(self, user_id: str, path: Path) -> None:
         if not path.exists() or path.stat().st_size < self.max_bytes:
             return
 
-        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
-        archive_name = f"{path.name}.{timestamp}.gz"
+        timestamp_raw = datetime.now(UTC)
+        timestamp_iso = timestamp_raw.isoformat().replace("+00:00", "Z")
+        archive_suffix = timestamp_raw.strftime("%Y%m%dT%H%M%S")
+        archive_name = f"{path.name}.{archive_suffix}.gz"
         archive_path = path.parent / archive_name
 
         with path.open("rb") as src, gzip.open(archive_path, "wb") as dst:
             shutil.copyfileobj(src, dst)
 
         path.unlink(missing_ok=True)
+        self._upload_archive(archive_path, user_id=user_id, timestamp=timestamp_iso)
         self._prune_archives(path)
 
     def _prune_archives(self, path: Path) -> None:
@@ -114,6 +136,103 @@ class InteractionLogger:
         for extra in archives[self.max_archives :]:
             with suppress(FileNotFoundError):
                 extra.unlink()
+
+    def _upload_archive(
+        self,
+        archive_path: Path,
+        *,
+        user_id: Optional[str],
+        timestamp: Optional[str],
+    ) -> None:
+        if not self._archive_uploader:
+            return
+
+        try:
+            self._archive_uploader.upload(
+                archive_path,
+                user_id=user_id,
+                timestamp=timestamp,
+            )
+            logger.info(
+                "Архив логов отправлен во внешнее хранилище",
+                extra={"user_id": user_id, "archive": archive_path.name},
+            )
+        except ArchiveUploadError as exc:
+            logger.warning(
+                "Не удалось выгрузить архив логов: %s",
+                exc,
+                extra={"user_id": user_id, "archive": archive_path.name},
+            )
+
+    def sync_pending_archives(self, user_id: Optional[str] = None) -> None:
+        """Отправляет существующие архивы в хранилище, если оно настроено."""
+
+        if not self._archive_uploader:
+            return
+
+        archives = self._collect_archives(user_id)
+        for archive_path in archives:
+            archive_user, archive_timestamp = self._extract_archive_metadata(archive_path)
+            try:
+                self._archive_uploader.upload(
+                    archive_path,
+                    user_id=archive_user,
+                    timestamp=archive_timestamp,
+                )
+                logger.info(
+                    "Отправлен отложенный архив логов",
+                    extra={"user_id": archive_user, "archive": archive_path.name},
+                )
+            except ArchiveUploadError as exc:
+                logger.warning(
+                    "Не удалось отправить отложенный архив: %s",
+                    exc,
+                    extra={"user_id": archive_user, "archive": archive_path.name},
+                )
+
+    def _collect_archives(self, user_id: Optional[str]) -> List[Path]:
+        if user_id:
+            base = self._log_file(user_id).name
+            pattern = f"{base}.*.gz"
+            return sorted(self.log_dir.glob(pattern))
+        return sorted(self.log_dir.glob("*.jsonl.*.gz"))
+
+    def _extract_archive_metadata(self, archive_path: Path) -> tuple[Optional[str], Optional[str]]:
+        stem = archive_path.with_suffix("").name  # удаляем .gz
+        base, _, suffix = stem.rpartition(".jsonl.")
+        user = base or None
+        timestamp: Optional[str] = None
+        if suffix:
+            try:
+                parsed = datetime.strptime(suffix, "%Y%m%dT%H%M%S").replace(tzinfo=UTC)
+                timestamp = parsed.isoformat().replace("+00:00", "Z")
+            except ValueError:
+                timestamp = None
+        return user, timestamp
+
+
+def build_interaction_logger(
+    log_dir: Path,
+    *,
+    max_bytes: int = 5 * 1024 * 1024,
+    max_archives: int = 10,
+    archive_uploader: Optional[ArchiveUploader] = None,
+) -> InteractionLogger:
+    """Создаёт `InteractionLogger`, автоматически подключая загрузчик из окружения."""
+
+    if archive_uploader is None:
+        from .archive_uploader import build_archive_uploader_from_env
+
+        archive_uploader = build_archive_uploader_from_env()
+
+    logger_instance = InteractionLogger(
+        log_dir=log_dir,
+        max_bytes=max_bytes,
+        max_archives=max_archives,
+        archive_uploader=archive_uploader,
+    )
+    logger_instance.sync_pending_archives()
+    return logger_instance
 
 
 def _utc_now_iso() -> str:

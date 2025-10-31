@@ -6,9 +6,10 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 from src.main_entrypoint import build_orchestrator
 from src.orchestrator.agent import Orchestrator
@@ -27,6 +28,76 @@ class HttpAdapterConfig:
     log_dir: Path = field(default_factory=lambda: Path("./data/logs"))
     allowed_tokens: Tuple[str, ...] = field(default_factory=tuple)
     auth_header: str = "X-API-Key"
+    max_failed_attempts: int = 5
+    audit_window_seconds: int = 900
+    block_duration_seconds: int = 900
+
+
+def _utc_now() -> datetime:
+    """Возвращает текущее время в UTC с таймзоной."""
+
+    return datetime.now(timezone.utc)
+
+
+class AuthAttemptTracker:
+    """Отслеживает неудачные попытки аутентификации и блокировки по IP."""
+
+    def __init__(
+        self,
+        *,
+        max_attempts: int,
+        window_seconds: int,
+        block_seconds: int,
+        now_provider: Callable[[], datetime] | None = None,
+    ) -> None:
+        if max_attempts <= 0:
+            raise ValueError("max_attempts должен быть положительным")
+        if window_seconds <= 0 or block_seconds <= 0:
+            raise ValueError("Параметры window_seconds и block_seconds должны быть положительными")
+        self.max_attempts = max_attempts
+        self.window = window_seconds
+        self.block_seconds = block_seconds
+        self._now = now_provider or _utc_now
+        self._failures: Dict[str, list[datetime]] = {}
+        self._blocked_until: Dict[str, datetime] = {}
+
+    def register_failure(self, identifier: str) -> Tuple[int, Optional[datetime]]:
+        """Регистрирует неудачную попытку и возвращает счётчик и время блокировки."""
+
+        now = self._now()
+        self._purge_expired(identifier, now)
+        attempts = self._failures.setdefault(identifier, [])
+        attempts.append(now)
+        block_until: Optional[datetime] = None
+        if len(attempts) >= self.max_attempts:
+            block_until = now + timedelta(seconds=self.block_seconds)
+            self._blocked_until[identifier] = block_until
+        return len(attempts), block_until
+
+    def register_success(self, identifier: str) -> None:
+        """Сбрасывает счётчик неудачных попыток и снимает блокировку."""
+
+        self._failures.pop(identifier, None)
+        self._blocked_until.pop(identifier, None)
+
+    def is_blocked(self, identifier: str) -> Optional[datetime]:
+        """Возвращает время окончания блокировки, если она активна."""
+
+        now = self._now()
+        blocked_until = self._blocked_until.get(identifier)
+        if blocked_until and blocked_until <= now:
+            self.register_success(identifier)
+            return None
+        return blocked_until
+
+    def _purge_expired(self, identifier: str, now: datetime) -> None:
+        """Удаляет устаревшие записи об ошибках вне окна наблюдения."""
+
+        attempts = self._failures.get(identifier)
+        if not attempts:
+            return
+        threshold = now - timedelta(seconds=self.window)
+        self._failures[identifier] = [moment for moment in attempts if moment >= threshold]
 
 
 def _normalize_tokens(tokens: Tuple[str, ...]) -> Tuple[str, ...]:
@@ -48,6 +119,7 @@ class AgentHttpRequestHandler(BaseHTTPRequestHandler):
     orchestrator: Orchestrator
     config: HttpAdapterConfig
     orchestrator_cache: Dict[Tuple[str, str, str], Orchestrator]
+    auth_tracker: AuthAttemptTracker
 
     def do_POST(self) -> None:  # noqa: N802 (совместимость с BaseHTTPRequestHandler)
         """Обрабатывает POST-запросы к эндпоинту `/chat`."""
@@ -56,12 +128,21 @@ class AgentHttpRequestHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "endpoint_not_found", "message": "Эндпоинт не найден"})
             return
 
+        blocked_until = self._blocked_until()
+        if blocked_until:
+            self._send_blocked_response(blocked_until)
+            return
+
         if not self._is_authorized():
-            self._send_json(
-                401,
-                {"error": "unauthorized", "message": "Недействительный или отсутствующий API-токен"},
-                headers={"WWW-Authenticate": self.config.auth_header},
-            )
+            blocked_until = self._blocked_until()
+            if blocked_until:
+                self._send_blocked_response(blocked_until)
+            else:
+                self._send_json(
+                    401,
+                    {"error": "unauthorized", "message": "Недействительный или отсутствующий API-токен"},
+                    headers={"WWW-Authenticate": self.config.auth_header},
+                )
             return
 
         length_header = self.headers.get("Content-Length", "0")
@@ -134,14 +215,46 @@ class AgentHttpRequestHandler(BaseHTTPRequestHandler):
             return False
 
         provided = self.headers.get(self.config.auth_header) or ""
+        remote = self._remote_ip()
         if is_token_allowed(provided, tokens):
+            if hasattr(self, "auth_tracker"):
+                self.auth_tracker.register_success(remote)
             return True
 
-        logger.warning(
-            "HTTP API: попытка доступа с неверным токеном",
-            extra={"remote": self.address_string()},
-        )
+        attempts = 1
+        block_until: Optional[datetime] = None
+        if hasattr(self, "auth_tracker"):
+            attempts, block_until = self.auth_tracker.register_failure(remote)
+        extra: Dict[str, object] = {"remote": self.address_string(), "attempts": attempts}
+        if block_until:
+            extra["blocked_until"] = block_until.isoformat()
+            logger.error("HTTP API: IP заблокирован из-за повторных ошибок", extra=extra)
+        else:
+            logger.warning("HTTP API: попытка доступа с неверным токеном", extra=extra)
         return False
+
+    def _blocked_until(self) -> Optional[datetime]:
+        """Возвращает время разблокировки, если адрес заблокирован."""
+
+        if not hasattr(self, "auth_tracker"):
+            return None
+        return self.auth_tracker.is_blocked(self._remote_ip())
+
+    def _remote_ip(self) -> str:
+        """Возвращает IP-адрес клиента."""
+
+        return self.client_address[0] if self.client_address else "unknown"
+
+    def _send_blocked_response(self, blocked_until: datetime) -> None:
+        """Возвращает ответ о временной блокировке клиента."""
+
+        retry_after = max(1, int((blocked_until - _utc_now()).total_seconds()))
+        payload = {
+            "error": "too_many_requests",
+            "message": "Доступ временно заблокирован из-за повторных ошибок аутентификации",
+            "blocked_until": blocked_until.isoformat().replace("+00:00", "Z"),
+        }
+        self._send_json(429, payload, headers={"Retry-After": str(retry_after)})
 
     def _send_json(self, status: int, payload: Dict[str, object], *, headers: Dict[str, str] | None = None) -> None:
         """Отправляет JSON-ответ клиенту."""
@@ -180,6 +293,11 @@ def run_http_server(config: HttpAdapterConfig | None = None) -> None:
     Handler.orchestrator_cache = {
         (active_config.mode, str(active_config.state_dir), str(active_config.log_dir)): base_orchestrator
     }
+    Handler.auth_tracker = AuthAttemptTracker(
+        max_attempts=active_config.max_failed_attempts,
+        window_seconds=active_config.audit_window_seconds,
+        block_seconds=active_config.block_duration_seconds,
+    )
 
     server = HTTPServer((active_config.host, active_config.port), Handler)
     logger.info(
