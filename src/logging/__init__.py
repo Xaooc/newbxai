@@ -2,8 +2,8 @@
 
 from .archive_uploader import S3ArchiveUploader, build_archive_uploader_from_env
 from .logger import (
-    ArchiveUploadError,
     ArchiveUploader,
+    ArchiveUploadError,
     InteractionLogger,
     build_interaction_logger,
 )

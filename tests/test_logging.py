@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.logging.logger import InteractionLogger
+from src.logging.logger import (
+    ArchiveUploadError,
+    ArchiveUploadMonitor,
+    InteractionLogger,
+)
 
 
 class DummyUploader:
@@ -63,3 +67,91 @@ def test_sync_pending_archives_uploads_existing_files(tmp_path):
     assert uploader.calls, "Должен быть выгружен найденный архив"
     paths = {call[0] for call in uploader.calls}
     assert archive_path in paths
+
+
+class FlakyUploader:
+    """Загрузчик, который может временно падать."""
+
+    def __init__(self, fail_before_success: int) -> None:
+        self.fail_before_success = fail_before_success
+        self.calls: int = 0
+
+    def upload(self, archive_path: Path, *, user_id: str | None = None, timestamp: str | None = None) -> None:
+        self.calls += 1
+        if self.calls <= self.fail_before_success:
+            raise ArchiveUploadError("temporary error")
+
+
+def test_archive_upload_retries_recorded(tmp_path):
+    """Ретраи при временной ошибке увеличивают счётчики мониторинга."""
+
+    uploader = FlakyUploader(fail_before_success=2)
+    monitor = ArchiveUploadMonitor()
+    logger = InteractionLogger(
+        log_dir=tmp_path,
+        max_bytes=200,
+        archive_uploader=uploader,
+        monitor=monitor,
+        upload_attempts=3,
+        sleep_fn=lambda _: None,
+    )
+
+    logger.log_iteration(
+        "user-3",
+        "сообщение" + " x" * 80,
+        {"THOUGHT": "", "ACTION": [], "ASSISTANT": ""},
+        state={"objects": {}},
+        executed_actions=[],
+        errors=[],
+    )
+    logger.log_iteration(
+        "user-3",
+        "второе" + " y" * 80,
+        {"THOUGHT": "", "ACTION": [], "ASSISTANT": ""},
+        state={"objects": {}},
+        executed_actions=[],
+        errors=[],
+    )
+
+    assert uploader.calls == 3
+    snapshot = monitor.snapshot()
+    assert snapshot["success"] == 1
+    assert snapshot["retries"] == 2
+    assert snapshot["failures"] == 0
+
+
+def test_archive_upload_final_failure_is_tracked(tmp_path):
+    """Если все попытки исчерпаны, фиксируется неудача, но исключение не выбрасывается."""
+
+    uploader = FlakyUploader(fail_before_success=5)
+    monitor = ArchiveUploadMonitor()
+    logger = InteractionLogger(
+        log_dir=tmp_path,
+        max_bytes=200,
+        archive_uploader=uploader,
+        monitor=monitor,
+        upload_attempts=2,
+        sleep_fn=lambda _: None,
+    )
+
+    logger.log_iteration(
+        "user-4",
+        "сообщение" + " x" * 80,
+        {"THOUGHT": "", "ACTION": [], "ASSISTANT": ""},
+        state={"objects": {}},
+        executed_actions=[],
+        errors=[],
+    )
+    logger.log_iteration(
+        "user-4",
+        "второе" + " y" * 80,
+        {"THOUGHT": "", "ACTION": [], "ASSISTANT": ""},
+        state={"objects": {}},
+        executed_actions=[],
+        errors=[],
+    )
+
+    snapshot = monitor.snapshot()
+    assert snapshot["success"] == 0
+    assert snapshot["failures"] == 1
+    assert snapshot["retries"] >= 1

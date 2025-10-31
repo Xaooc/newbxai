@@ -1,4 +1,4 @@
-"""Клиент для обращения к модели GPT-5 Thinking."""
+"""Клиент для обращения к ChatGPT (модели семейства GPT-4.1)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import requests
+from src.orchestrator.context_builder import build_state_summary
 
 logger = logging.getLogger(__name__)
 
@@ -19,9 +20,9 @@ class ModelClientError(Exception):
 
 @dataclass
 class ModelClient:
-    """Минимальный HTTP-клиент для вызова GPT-5 Thinking."""
+    """Минимальный HTTP-клиент для вызова ChatGPT."""
 
-    model_name: str = "gpt-5-thinking"
+    model_name: str = "gpt-4.1"
     api_key: Optional[str] = None
     base_url: str = "https://api.openai.com/v1"
     timeout: int = 60
@@ -29,7 +30,7 @@ class ModelClient:
 
     def __post_init__(self) -> None:
         if self.api_key is None:
-            raise ModelClientError("Не задан API-ключ OpenAI (переменная OPENAI_API_KEY)")
+            raise ModelClientError("Не задан API-ключ ChatGPT (переменная OPENAI_API_KEY)")
 
     def generate(
         self,
@@ -81,8 +82,11 @@ class ModelClient:
         state_snapshot: Dict[str, Any],
         user_message: str,
     ) -> List[Dict[str, str]]:
+        summary = build_state_summary(state_snapshot)
         state_json = json.dumps(state_snapshot, ensure_ascii=False, indent=2)
         state_block = (
+            "Краткая сводка состояния:\n"
+            f"{summary}\n\n"
             "Текущее состояние агента (JSON):\n"
             f"```json\n{state_json}\n```"
         )
@@ -119,7 +123,7 @@ class ModelClient:
         return None
 
 
-def build_default_model_client(model_name: str = "gpt-5-thinking") -> ModelClient:
+def build_default_model_client(model_name: str = "gpt-4.1") -> ModelClient:
     """Создаёт клиент, используя переменные окружения."""
 
     api_key = os.getenv("OPENAI_API_KEY")
