@@ -11,7 +11,7 @@ import pytest
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from src.logging.logger import InteractionLogger
+from src.app_logging.logger import InteractionLogger
 from src.orchestrator.agent import Orchestrator, OrchestratorSettings
 from src.state.manager import AgentState, AgentStateManager
 

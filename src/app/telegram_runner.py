@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from src.adapters.telegram_bot import TelegramBotAdapter, TelegramBotConfig
 
 from src.config import load_env_file
-from src.logging.logger import build_interaction_logger
+from src.app_logging.logger import build_interaction_logger
 from src.orchestrator.agent import Orchestrator, OrchestratorSettings
 from src.orchestrator.model_client import ModelClientError, build_default_model_client
 from src.state.manager import AgentStateManager

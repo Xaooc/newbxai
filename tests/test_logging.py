@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.logging.logger import (
+from src.app_logging.logger import (
     ArchiveUploadError,
     ArchiveUploadMonitor,
     InteractionLogger,

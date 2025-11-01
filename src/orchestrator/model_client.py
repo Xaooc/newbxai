@@ -14,6 +14,10 @@ from src.orchestrator.context_builder import build_state_summary
 logger = logging.getLogger(__name__)
 
 
+DEFAULT_MODEL_NAME = "gpt-4.1"
+MODEL_ENV_VAR = "OPENAI_MODEL"
+
+
 class ModelClientError(Exception):
     """Исключение, возникающее при ошибке общения с моделью."""
 
@@ -22,7 +26,7 @@ class ModelClientError(Exception):
 class ModelClient:
     """Минимальный HTTP-клиент для вызова ChatGPT."""
 
-    model_name: str = "gpt-4.1"
+    model_name: str = DEFAULT_MODEL_NAME
     api_key: Optional[str] = None
     base_url: str = "https://api.openai.com/v1"
     timeout: int = 60
@@ -123,9 +127,25 @@ class ModelClient:
         return None
 
 
-def build_default_model_client(model_name: str = "gpt-4.1") -> ModelClient:
+def resolve_model_name(preferred_name: Optional[str] = None) -> str:
+    """Определяет имя модели, учитывая окружение и переданное значение."""
+
+    if preferred_name:
+        candidate = preferred_name.strip()
+        if candidate:
+            return candidate
+
+    env_value = os.getenv(MODEL_ENV_VAR, "").strip()
+    if env_value:
+        return env_value
+
+    return DEFAULT_MODEL_NAME
+
+
+def build_default_model_client(model_name: Optional[str] = None) -> ModelClient:
     """Создаёт клиент, используя переменные окружения."""
 
     api_key = os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
-    return ModelClient(model_name=model_name, api_key=api_key, base_url=base_url)
+    resolved_model_name = resolve_model_name(model_name)
+    return ModelClient(model_name=resolved_model_name, api_key=api_key, base_url=base_url)
