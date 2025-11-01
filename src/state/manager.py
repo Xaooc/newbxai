@@ -26,8 +26,7 @@ class AgentState:
             "current_task_id": None,
         }
     )
-    next_planned_actions: List[Dict[str, Any]] = field(default_factory=list)
-    confirmations: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    last_plan: Dict[str, Any] = field(default_factory=dict)
     event_bindings: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -38,8 +37,7 @@ class AgentState:
             "done": self.done,
             "in_progress": self.in_progress,
             "objects": self.objects,
-            "next_planned_actions": self.next_planned_actions,
-            "confirmations": self.confirmations,
+            "last_plan": self.last_plan,
             "event_bindings": self.event_bindings,
         }
 
@@ -60,8 +58,7 @@ class AgentState:
                 },
                 **data.get("objects", {}),
             ),
-            next_planned_actions=list(data.get("next_planned_actions", [])),
-            confirmations=dict(data.get("confirmations", {})),
+            last_plan=dict(data.get("last_plan", {})),
             event_bindings=list(data.get("event_bindings", [])),
         )
 

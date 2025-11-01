@@ -1,4 +1,4 @@
-"""Оркестратор, управляющий коммуникацией с моделью и Bitrix24."""
+﻿"""Оркестратор, управляющий коммуникацией с моделью и Bitrix24."""
 
 from __future__ import annotations
 
@@ -7,12 +7,11 @@ import logging
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from hashlib import md5
 from threading import Lock
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from urllib.parse import parse_qs
 
-from src.bitrix_client.client import BitrixClientError, call_bitrix
+from src.bitrix_client.client import BitrixClientError, call_bitrix, sanitize_for_logging
 from src.app_logging.logger import InteractionLogger
 from src.orchestrator.model_client import (
     ModelClient,
@@ -22,6 +21,9 @@ from src.orchestrator.model_client import (
 from src.state.manager import AgentState, AgentStateManager
 
 logger = logging.getLogger(__name__)
+
+ErrorEntry = Union[str, Dict[str, Any]]
+
 
 
 @dataclass
@@ -418,6 +420,8 @@ DEFAULT_SYSTEM_PROMPT = (
     " crm.deal.category.stage.list, crm.status.list, crm.activity.list, crm.activity.add, crm.timeline.comment.add,"
     " tasks.task.add, tasks.task.update, tasks.task.list, task.commentitem.add, task.checklistitem.add,"
     " sonet.group.get, sonet.group.user.get, batch, event.bind, event.get, event.unbind. Запрещено использовать любые иные методы.\n"
+    "Перед выполнением плана обязательно представь его пользователю, дождись явного подтверждения и только после этого повторяй шаги с confirmed: true. Пока подтверждения нет, каждый шаг в ACTION должен иметь requires_confirmation: true.\n"
+    "Для поиска сотрудников используй только user.get. Методы crm.contact.* предназначены исключительно для клиентов и внешних контактов.\n"
     "Перед изменением сумм, стадий, ответственных, дедлайнов указывай requires_confirmation=true и жди подтверждения.\n"
     "В блоке ASSISTANT объясняй шаги простым языком: не упоминай внутренние идентификаторы или названия REST-методов,"
     " подчеркивай, чем итог полезен пользователю."
@@ -495,11 +499,14 @@ class Orchestrator:
             return lock
 
     def _process_message_locked(self, user_id: str, message: str) -> str:
+    def _process_message_locked(self, user_id: str, message: str) -> str:
         """Реализация обработки запроса под блокировкой конкретного пользователя."""
 
         state = self.state_manager.load_state(user_id)
+
         if message and (not state.goals or state.goals[0] != message):
             state.goals.insert(0, message)
+
         logger.debug("Загружено состояние", extra={"user_id": user_id, "state": state})
 
         self_check_warnings = self._run_context_self_check(state)
@@ -513,14 +520,16 @@ class Orchestrator:
         self.interaction_logger.log_model_response(user_id, message, model_response)
 
         actions = model_response.get("ACTION", [])
-        assistant_reply = model_response.get("ASSISTANT", "")
+        assistant_from_model = model_response.get("ASSISTANT", "")
 
-        executed_actions: List[Dict[str, Any]] = []
-        errors: List[str] = []
-        pending_actions: List[Dict[str, Any]] = []
+        plan_summary = self._summarize_plan_actions(actions)
+        self._store_last_plan(state, actions, plan_summary)
+
+        executed_actions = []
+        errors: List[ErrorEntry] = []
 
         if self.settings.mode == "shadow":
-            state.next_planned_actions = actions
+            logger.info("Режим shadow: действия не выполняются", extra={"user_id": user_id, "plan": actions})
         else:
             for action in actions:
                 method = action.get("method")
@@ -536,43 +545,15 @@ class Orchestrator:
                             "не получилось разобрать параметры. Уточните, что нужно сделать, и я перепланирую шаги.",
                         )
                     )
-                    pending_actions.append(action)
                     continue
 
                 comment = action.get("comment", "")
-                http_method = action.get("http_method")
-                decision = (action.get("confirmation_decision") or "").strip().lower()
-
-                if decision == "approve" and not action.get("confirmed"):
-                    action["confirmed"] = True
-
-                if decision == "deny":
-                    confirmation_key = self._build_confirmation_key(method or "", params)
-                    denial_reason = action.get("confirmation_reason") or self._build_confirmation_reason(
-                        method or "неизвестный метод",
-                        params,
-                        RISKY_FIELDS_BY_METHOD.get(method or "", {}).get("fields", set()),
-                    )
-                    record = state.confirmations.get(confirmation_key, {})
-                    record.update(
-                        {
-                            "status": "denied",
-                            "denied_at": _utc_iso_z(),
-                            "action": action,
-                            "reason": denial_reason,
-                            "description": denial_reason,
-                        }
-                    )
-                    state.confirmations[confirmation_key] = record
-                    self._remove_action_from_plan(state, action)
-                    errors.append(self._format_action_error(method, denial_reason))
-                    continue
+                http_method = (action.get("http_method") or self._default_http_method(method or "")).upper()
 
                 if not method:
                     errors.append(
                         "Одно из действий не распознано. Опишите задачу подробнее, и я предложу новую последовательность."
                     )
-                    pending_actions.append(action)
                     continue
 
                 if not self._is_action_allowed(method, action):
@@ -582,95 +563,57 @@ class Orchestrator:
                             f"это действие недоступно в режиме безопасности {self.settings.mode}.",
                         )
                     )
-                    pending_actions.append(action)
                     continue
 
-                validation_errors = self._validate_action_params(method, params)
+                validation_errors, _missing_paths = self._validate_action_params(method, params)
                 if validation_errors:
                     errors.extend(validation_errors)
-                    pending_actions.append(action)
                     continue
-
-                http_method = (http_method or self._default_http_method(method)).upper()
-
-                confirmation_needed, confirmation_key, confirmation_reason = self._check_confirmation_needed(
-                    state, action
-                )
-                if confirmation_needed:
-                    record_status = state.confirmations.get(confirmation_key or "", {}).get("status")
-                    if record_status == "denied":
-                        errors.append(
-                            self._format_action_error(
-                                method,
-                                f"оно ранее было отклонено: {confirmation_reason}. Если ситуация изменилась, опишите новую формулировку.",
-                            )
-                        )
-                        self._remove_action_from_plan(state, action)
-                        continue
-                    errors.append(f"{confirmation_reason} Нужна ваша явная команда, чтобы продолжить.")
-                    pending_actions.append(action)
-                    continue
-
-                if confirmation_key:
-                    record = state.confirmations.get(confirmation_key, {})
-                    record["status"] = "approved"
-                    record["approved_at"] = _utc_iso_z()
-                    record["reason"] = confirmation_reason
-                    record["description"] = confirmation_reason
-                    state.confirmations[confirmation_key] = record
 
                 try:
                     result = call_bitrix(method, params, http_method=http_method)
-                    executed_actions.append({
-                        "method": method,
-                        "params": params,
-                        "comment": comment,
-                        "result": result,
-                    })
+                    executed_actions.append(
+                        {
+                            "method": method,
+                            "params": params,
+                            "comment": comment,
+                            "result": result,
+                        }
+                    )
                     self._update_state_from_action(state, action, result)
                 except BitrixClientError as exc:
-                    logger.warning(
+                    sanitized_params = sanitize_for_logging(params or {})
+                    logger.error(
                         "Ошибка Bitrix24 при выполнении действия",
-                        extra={"method": method, "error": str(exc)},
+                        extra={"method": method, "error": str(exc), "params": sanitized_params},
+                    )
+                    user_message = self._format_action_error(
+                        method,
+                        "Bitrix24 отклонил запрос. Проверьте данные или повторите попытку позднее.",
                     )
                     errors.append(
-                        self._format_action_error(
-                            method,
-                            "Bitrix24 временно отклонил запрос. Проверьте данные или повторите попытку позднее.",
-                        )
+                        {
+                            "user_message": user_message,
+                            "diagnostic": str(exc),
+                            "method": method,
+                            "params": sanitized_params,
+                        }
                     )
-                    pending_actions.append(action)
-
-        if self.settings.mode != "shadow":
-            state.next_planned_actions = pending_actions
 
         summary_text = self._build_user_summary(executed_actions)
-        assistant_reply = self._merge_reply_with_summary(assistant_reply, summary_text)
 
-        if (
-            self.settings.mode != "shadow"
-            and not executed_actions
-            and not pending_actions
-            and not errors
-            and not actions
-        ):
-            note = (
-                "Сейчас напомнил информацию из ранее выполненных шагов — новые запросы к Bitrix24 не потребовались."
-            )
-            assistant_reply = (
-                f"{assistant_reply}\n\n{note}" if assistant_reply else note
-            )
-
-        if self_check_warnings:
-            errors.extend(self_check_warnings)
-
-        assistant_reply = self._append_errors_to_reply(assistant_reply, errors)
+        assistant_reply = self._compose_final_reply(
+            assistant_from_model=assistant_from_model,
+            plan_summary=plan_summary,
+            execution_summary=summary_text,
+            errors=errors,
+            warnings=self_check_warnings,
+        )
 
         self.state_manager.save_state(user_id, state)
         self.interaction_logger.log_iteration(user_id, message, model_response, state, executed_actions, errors)
 
-        return assistant_reply or "Не удалось получить ответ от модели."
-
+        return assistant_reply or "Не удалось получить ответ от модели. Попробуйте повторить запрос позже."
     def _call_model(self, message: str, state: AgentState) -> Dict[str, Any]:
         """Обёртка вызова ChatGPT.
 
@@ -764,15 +707,25 @@ class Orchestrator:
         return base
 
     @staticmethod
-    def _append_errors_to_reply(reply: str, errors: List[str]) -> str:
+    def _append_errors_to_reply(reply: str, errors: List[ErrorEntry]) -> str:
         """Добавляет блок предупреждений к ответу."""
 
         if not errors:
             return reply
-        warning_lines = [f"⚠️ {message}" for message in errors]
+
+        warning_lines = []
+        for item in errors:
+            if isinstance(item, dict):
+                message = item.get("user_message") or item.get("message") or item.get("diagnostic") or str(item)
+            else:
+                message = item
+            warning_lines.append(f"⚠️ {message}")
+
+        appendix = "\n".join(warning_lines)
         if reply:
-            return f"{reply}\n\n" + "\n".join(warning_lines)
-        return "\n".join(warning_lines)
+            return f"{reply}\n\n{appendix}"
+        return appendix
+
 
     def _format_action_error(self, method: Optional[str], message: str) -> str:
         """Формирует человеко-понятное описание ошибки действия."""
@@ -826,6 +779,14 @@ class Orchestrator:
                 "Некоторые шаги помечены как «в работе», но без описания. "
                 "Поясните, какой следующий шаг выполнить."
             )
+
+        plan_record = state.plan_confirmation or {}
+        if (plan_record.get("status") or "").lower() == "pending":
+            requested_at = self._parse_iso_datetime(plan_record.get("requested_at"))
+            if requested_at and requested_at < datetime.now(UTC) - timedelta(minutes=10):
+                warnings.append(
+                    "План всё ещё ожидает подтверждения. Напишите, можно ли выполнять шаги или что нужно поменять."
+                )
 
         return warnings
 
@@ -907,14 +868,15 @@ class Orchestrator:
             return "GET"
         return "POST"
 
-    def _validate_action_params(self, method: str, params: Dict[str, Any]) -> List[str]:
+    def _validate_action_params(self, method: str, params: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         """Проверяет наличие обязательных параметров для метода."""
 
         spec = METHOD_PARAMETER_REQUIREMENTS.get(method)
         if not spec:
-            return []
+            return [], []
 
         errors: List[str] = []
+        missing_paths: List[Tuple[Any, ...]] = []
         missing_required = False
         wrong_structure = False
         empty_values = False
@@ -942,6 +904,7 @@ class Orchestrator:
             value = get_value(path)
             if not self._is_value_present(value):
                 missing_required = True
+                missing_paths.append(path)
 
         for path in spec.get("dict_fields", []):
             value = get_value(path)
@@ -960,7 +923,7 @@ class Orchestrator:
         friendly = self._friendly_method_name(method)
         if missing_required:
             errors.append(
-                f"Для действия «{friendly}» не хватает обязательных данных. Пожалуйста, уточните детали и повторите запрос."
+                f"Для действия «{friendly}» не хватает обязательных данных. Пожалуйста, уточните детали, укажите их и повторите запрос."
             )
         if wrong_structure:
             errors.append(
@@ -971,7 +934,41 @@ class Orchestrator:
                 f"Для действия «{friendly}» указаны пустые поля. Заполните их, чтобы я мог продолжить."
             )
 
-        return errors
+        if missing_paths:
+            friendly_names: List[str] = []
+            for path in missing_paths:
+                name = self._friendly_missing_field(path)
+                if name.lower() in {"fields", "filter"}:
+                    continue
+                friendly_names.append(name)
+            if friendly_names:
+                deduped = list(dict.fromkeys(friendly_names))
+                friendly_fields = ", ".join(f"«{name}»" for name in deduped)
+                errors.append(f"Заполните поле {friendly_fields}.")
+
+        return errors, [self._path_to_str(path) for path in missing_paths]
+
+    def _friendly_missing_field(self, path: Tuple[Any, ...]) -> str:
+        """Возвращает дружественное имя поля для сообщения об ошибке."""
+
+        if not path:
+            return "значение"
+        last = path[-1]
+        candidate: Optional[str] = None
+        if isinstance(last, tuple):
+            for option in last:
+                if isinstance(option, str):
+                    candidate = option
+                    break
+        elif isinstance(last, str):
+            candidate = last
+
+        if not candidate and len(path) >= 2 and isinstance(path[-2], str):
+            candidate = path[-2]
+
+        if not candidate:
+            return "значение"
+        return self._friendly_field_name(candidate)
 
     @staticmethod
     def _path_to_str(path: Tuple[Any, ...]) -> str:
@@ -1187,6 +1184,291 @@ class Orchestrator:
             field_list = ", ".join(sorted(target_fields))
             return f"Планируется изменить {field_list}. Подтвердите, пожалуйста."
         return f"Действие «{friendly_method}» затрагивает критичные настройки. Нужна ваша проверка."
+
+    @staticmethod
+    def _normalize_user_text(message: str) -> str:
+        """Приводит текст пользователя к нижнему регистру и убирает лишние пробелы."""
+
+        return " ".join(message.strip().lower().split())
+
+    def _maybe_handle_plan_confirmation_message(self, state: AgentState, message: Optional[str]) -> Optional[str]:
+        """Определяет, подтвердил или отклонил пользователь текущий план."""
+
+        if not message or not state.plan_confirmation:
+            return None
+
+        normalized = self._normalize_user_text(message)
+        if not normalized:
+            return None
+
+        plan_status = (state.plan_confirmation or {}).get("status")
+        if any(phrase in normalized for phrase in PLAN_DENY_PHRASES):
+            if plan_status not in {None, "denied"}:
+                state.plan_confirmation["status"] = "denied"
+                state.plan_confirmation["denied_at"] = _utc_iso_z()
+                state.next_planned_actions = []
+                return "Остановил выполнение плана. Напишите, какие шаги скорректировать."
+            return None
+
+        if any(phrase in normalized for phrase in PLAN_CONFIRM_PHRASES):
+            steps = state.plan_confirmation.get("steps", [])
+            state.plan_confirmation.setdefault("summary", self._summarize_plan_actions(steps))
+            state.plan_confirmation.setdefault("step_keys", self._extract_action_keys(steps))
+            state.plan_confirmation["status"] = "approved"
+            state.plan_confirmation["approved_at"] = _utc_iso_z()
+            self._mark_plan_steps_confirmed(state, steps)
+            return "План подтверждён, приступаю к выполнению согласованных шагов."
+
+        return None
+
+    def _hash_plan(self, actions: List[Dict[str, Any]]) -> str:
+        """Возвращает md5-хеш набора шагов плана."""
+
+        canonical_actions = [self._canonicalize_plan_action(action) for action in actions]
+        serialized = json.dumps(canonical_actions, sort_keys=True, ensure_ascii=False)
+        return md5(serialized.encode("utf-8")).hexdigest()
+
+    def _canonicalize_plan_action(self, action: Dict[str, Any]) -> Dict[str, Any]:
+        """Возвращает копию шага без временных флагов, влияющих на подтверждение."""
+
+        if not isinstance(action, dict):
+            return action
+
+        canonical: Dict[str, Any] = {}
+        for key, value in action.items():
+            if key in PLAN_HASH_IGNORED_KEYS:
+                continue
+            canonical[key] = self._canonicalize_plan_value(value)
+        return canonical
+
+    def _canonicalize_plan_value(self, value: Any) -> Any:
+        """Рекурсивно нормализует значение шага для сравнения хеша."""
+
+        if isinstance(value, dict):
+            return {key: self._canonicalize_plan_value(val) for key, val in value.items()}
+        if isinstance(value, list):
+            return [self._canonicalize_plan_value(item) for item in value]
+        return value
+
+    def _extract_action_keys(self, actions: List[Dict[str, Any]]) -> List[str]:
+        """Возвращает список ключей подтверждения для набора шагов."""
+
+        keys: List[str] = []
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            method = action.get("method") or ""
+            if not method:
+                continue
+            params = action.get("params") if isinstance(action.get("params"), dict) else {}
+            confirmation_key = self._build_confirmation_key(method, params)
+            if confirmation_key:
+                keys.append(confirmation_key)
+        return keys
+
+    def _mark_plan_steps_confirmed(self, state: AgentState, steps: List[Dict[str, Any]]) -> None:
+        """Помечает шаги плана как одобренные в списке подтверждений."""
+
+        if not steps:
+            return
+
+        approved_keys: Set[str] = set(state.plan_confirmation.get("approved_step_keys") or [])
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            method = step.get("method") or ""
+            params = step.get("params") if isinstance(step.get("params"), dict) else {}
+            if not method:
+                continue
+
+            confirmation_key = self._build_confirmation_key(method, params)
+            if not confirmation_key:
+                continue
+
+            record = state.confirmations.get(confirmation_key, {})
+            reason = record.get("reason") or step.get("confirmation_reason")
+            risky_fields = RISKY_FIELDS_BY_METHOD.get(method, {}).get("fields", set())
+            if not reason:
+                reason = self._build_confirmation_reason(method, params, risky_fields)
+
+            record.update(
+                {
+                    "status": "approved",
+                    "approved_at": _utc_iso_z(),
+                    "action": step,
+                    "reason": reason,
+                    "description": reason,
+                }
+            )
+            state.confirmations[confirmation_key] = record
+            approved_keys.add(confirmation_key)
+
+        if approved_keys:
+            state.plan_confirmation["approved_step_keys"] = list(dict.fromkeys(approved_keys))
+
+    def _summarize_plan_actions(self, actions: List[Dict[str, Any]]) -> str:
+        """Строит краткое человеко-понятное описание плана."""
+
+        if not actions:
+            return ""
+
+        lines: List[str] = []
+        for idx, action in enumerate(actions, 1):
+            method = action.get("method")
+            friendly = self._friendly_method_name(method)
+            comment = (action.get("comment") or "").strip()
+
+            params = action.get("params") if isinstance(action.get("params"), dict) else {}
+            extra: Optional[str] = None
+            if isinstance(params, dict):
+                if "id" in params:
+                    extra = f"id={params.get('id')}"
+                elif "ID" in params:
+                    extra = f"id={params.get('ID')}"
+                elif "taskId" in params:
+                    extra = f"taskId={params.get('taskId')}"
+                elif isinstance(params.get("fields"), dict):
+                    entity_id = params["fields"].get("ENTITY_ID")
+                    entity_type = params["fields"].get("ENTITY_TYPE")
+                    if entity_type and entity_id:
+                        extra = f"{entity_type}:{entity_id}"
+
+            pieces = [f"{idx}) {friendly}"]
+            if comment:
+                pieces.append(f"— {comment}")
+            if extra:
+                pieces.append(f"({extra})")
+            lines.append(" ".join(pieces).strip())
+
+        return "\n".join(lines)
+
+    def _store_last_plan(self, state: AgentState, actions: List[Dict[str, Any]], summary: str) -> None:
+        """Сохраняет последний план в состоянии пользователя."""
+
+        state.last_plan = {
+            "timestamp": _utc_iso_z(),
+            "summary": summary or "",
+            "actions": actions or [],
+        }
+
+    def _compose_final_reply(
+        self,
+        assistant_from_model: str,
+        plan_summary: str,
+        execution_summary: str,
+        errors: List[ErrorEntry],
+        warnings: List[str],
+    ) -> str:
+        """Собирает финальный ответ: план, результаты, ошибки и рекомендации."""
+
+        reply_parts: List[str] = []
+        if plan_summary:
+            reply_parts.append(f"План действий:\n{plan_summary}")
+
+        if self.settings.mode == "shadow":
+            reply_parts.append(
+                "Работаю в режиме shadow — план сохранил, но запросы к Bitrix24 не выполнял."
+            )
+        elif execution_summary:
+            reply_parts.append(execution_summary)
+
+        sanitized_assistant = self._strip_confirmation_language(assistant_from_model)
+        if sanitized_assistant:
+            reply_parts.append(sanitized_assistant)
+
+        base_reply = "\n\n".join(part.strip() for part in reply_parts if part and part.strip())
+        combined_errors: List[ErrorEntry] = list(errors)
+        combined_errors.extend(warnings)
+        final_reply = self._append_errors_to_reply(base_reply, combined_errors)
+        return final_reply.strip()
+
+    @staticmethod
+    def _strip_confirmation_language(text: str) -> str:
+        """Удаляет из ответа модели просьбы подтвердить план и лишние повторения."""
+
+        if not text:
+            return ""
+
+        lines = []
+        for line in text.splitlines():
+            normalized = line.strip().lower()
+            if not normalized:
+                lines.append(line)
+                continue
+            if "подтверд" in normalized or "жду подтверждения" in normalized:
+                continue
+            lines.append(line)
+        return "\n".join(lines).strip()
+
+    def _update_plan_confirmation_state(self, state: AgentState, actions: List[Dict[str, Any]]) -> None:
+        """Синхронизирует состояние плана с текущим ACTION."""
+
+        if not actions:
+            state.plan_confirmation = {}
+            state.next_planned_actions = []
+            return
+
+        plan_hash = self._hash_plan(actions)
+        plan_summary = self._summarize_plan_actions(actions)
+        new_step_keys = self._extract_action_keys(actions)
+        plan_record = state.plan_confirmation or {}
+
+        current_hash = plan_record.get("hash")
+        current_status = plan_record.get("status")
+        approved_keys: Set[str] = set(plan_record.get("approved_step_keys") or [])
+
+        if current_hash != plan_hash:
+            subset_of_approved = bool(approved_keys) and set(new_step_keys).issubset(approved_keys)
+            if current_status == "approved" and subset_of_approved:
+                plan_record["hash"] = plan_hash
+                plan_record["summary"] = plan_summary
+                plan_record["steps"] = actions
+                plan_record["step_keys"] = new_step_keys
+                state.plan_confirmation = plan_record
+            else:
+                if current_status == "pending":
+                    plan_record["status"] = "denied"
+                    plan_record["denied_at"] = _utc_iso_z()
+                state.plan_confirmation = {
+                    "status": "pending",
+                    "hash": plan_hash,
+                    "requested_at": _utc_iso_z(),
+                    "approved_at": None,
+                    "denied_at": None,
+                    "summary": plan_summary,
+                    "steps": actions,
+                    "step_keys": new_step_keys,
+                    "approved_step_keys": [],
+                }
+        else:
+            if current_status == "denied":
+                plan_record["status"] = "pending"
+                plan_record["requested_at"] = _utc_iso_z()
+                plan_record["denied_at"] = None
+                plan_record["approved_at"] = None
+                plan_record["approved_step_keys"] = []
+            plan_record["summary"] = plan_summary
+            plan_record["steps"] = actions
+            plan_record["step_keys"] = new_step_keys
+            state.plan_confirmation = plan_record
+
+        state.next_planned_actions = actions
+
+    def _ensure_plan_prompt_appended(self, reply: str, state: AgentState) -> str:
+        """Добавляет в ответ просьбу подтвердить план, если он не одобрен."""
+
+        plan_record = state.plan_confirmation or {}
+        if plan_record.get("status") != "pending":
+            return reply
+
+        summary = plan_record.get("summary") or self._summarize_plan_actions(plan_record.get("steps", []))
+        prompt_parts: List[str] = []
+        if summary:
+            prompt_parts.append("План действий:\n" + summary)
+        prompt_parts.append("Подтвердите план или напишите, что нужно изменить.")
+        prompt_block = "\n\n".join(prompt_parts)
+        cleaned_reply = reply.strip()
+        return f"{cleaned_reply}\n\n{prompt_block}" if cleaned_reply else prompt_block
 
     def _update_state_from_action(self, state: AgentState, action: Dict[str, Any], result: Dict[str, Any]) -> None:
         """Обновляет `agent_state` на основе выполненного действия."""
@@ -1472,3 +1754,13 @@ class Orchestrator:
             if item_key != target_key:
                 filtered.append(item)
         state.next_planned_actions = filtered
+
+        if state.plan_confirmation:
+            steps = [
+                step
+                for step in state.plan_confirmation.get("steps", [])
+                if self._build_confirmation_key(step.get("method", ""), step.get("params") or {}) != target_key
+            ]
+            state.plan_confirmation["steps"] = steps
+            state.plan_confirmation["step_keys"] = self._extract_action_keys(steps)
+            state.plan_confirmation["summary"] = self._summarize_plan_actions(steps)
