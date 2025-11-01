@@ -23,6 +23,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      - name: Run ruff
+        run: ruff check src tests
+
+      - name: Run mypy
+        run: mypy --explicit-package-bases --follow-imports=skip src/app/telegram_runner.py src/adapters/telegram_bot.py
+
       - name: Run pytest with coverage
         run: |
           pytest --cov=src --cov-report=xml --cov-report=term -W error::DeprecationWarning

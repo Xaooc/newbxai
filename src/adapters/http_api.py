@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
-from src.main_entrypoint import build_orchestrator
+from src.app import build_orchestrator
 from src.orchestrator.agent import Orchestrator
 
 logger = logging.getLogger(__name__)

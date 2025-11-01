@@ -12,9 +12,9 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from src.adapters.http_api import (  # noqa: E402
     AuthAttemptTracker,
     HttpAdapterConfig,
+    _normalize_tokens,
     is_token_allowed,
     run_http_server,
-    _normalize_tokens,
 )
 
 

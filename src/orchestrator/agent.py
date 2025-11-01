@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import md5
+from threading import Lock
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs
-from typing import Any, Dict, List, Optional, Set, Tuple
 
 from src.bitrix_client.client import BitrixClientError, call_bitrix
 from src.logging.logger import InteractionLogger
@@ -16,7 +18,7 @@ from src.orchestrator.model_client import (
     ModelClient,
     ModelClientError,
 )
-from src.state.manager import AgentStateManager, AgentState
+from src.state.manager import AgentState, AgentStateManager
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +101,206 @@ ALLOWED_METHODS_BY_MODE = {
     "shadow": set(),
     "canary": READ_METHODS | SAFE_CREATE_METHODS | BATCH_METHODS,
     "full": ALL_ALLOWED_METHODS,
+}
+
+FRIENDLY_METHOD_NAMES: Dict[str, str] = {
+    "user.current": "просмотр сведений о текущем сотруднике",
+    "user.get": "поиск сотрудника",
+    "crm.contact.list": "поиск контактов",
+    "crm.contact.get": "просмотр контакта",
+    "crm.company.list": "поиск компаний",
+    "crm.company.get": "просмотр компании",
+    "crm.deal.list": "поиск сделок",
+    "crm.deal.get": "просмотр сделки",
+    "crm.deal.add": "создание сделки",
+    "crm.deal.update": "обновление сделки",
+    "crm.deal.category.list": "просмотр направлений продаж",
+    "crm.deal.category.stage.list": "просмотр этапов направления",
+    "crm.status.list": "просмотр справочника статусов",
+    "crm.activity.list": "поиск дел",
+    "crm.activity.add": "создание дела",
+    "crm.timeline.comment.add": "добавление комментария",
+    "tasks.task.add": "создание задачи",
+    "tasks.task.update": "обновление задачи",
+    "tasks.task.list": "поиск задач",
+    "task.commentitem.add": "добавление комментария к задаче",
+    "task.checklistitem.add": "добавление пункта чек-листа",
+    "sonet.group.get": "просмотр рабочей группы",
+    "sonet.group.user.get": "просмотр состава рабочей группы",
+    "event.bind": "настройка уведомления",
+    "event.get": "просмотр активных уведомлений",
+    "event.unbind": "отключение уведомления",
+    "batch": "пакетное действие",
+}
+
+FRIENDLY_FIELD_NAMES: Dict[str, str] = {
+    "OPPORTUNITY": "сумму",
+    "ASSIGNED_BY_ID": "ответственного",
+    "STAGE_ID": "этап",
+    "CATEGORY_ID": "воронку",
+    "RESPONSIBLE_ID": "ответственного",
+    "DEADLINE": "крайний срок",
+    "TITLE": "название",
+    "SUBJECT": "тему",
+    "COMMENT": "комментарий",
+    "DESCRIPTION": "описание",
+}
+
+
+def _get_fields(params: Dict[str, Any]) -> Dict[str, Any]:
+    if isinstance(params, dict):
+        fields = params.get("fields")
+        if isinstance(fields, dict):
+            return fields
+    return {}
+
+
+def _extract_text(value: Any, limit: int = 120) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    clean = value.strip()
+    if not clean:
+        return None
+    if len(clean) > limit:
+        return clean[: limit - 1].rstrip() + "…"
+    return clean
+
+
+def _extract_count(result: Dict[str, Any]) -> Optional[int]:
+    payload = result.get("result") if isinstance(result, dict) else None
+    if isinstance(payload, dict):
+        if isinstance(payload.get("total"), int):
+            return payload["total"]
+        items = payload.get("items")
+        if isinstance(items, list):
+            return len(items)
+    if isinstance(payload, list):
+        return len(payload)
+    return None
+
+
+ActionDescriptor = Callable[[Dict[str, Any], Dict[str, Any]], str]
+
+
+def _describe_deal_add(params: Dict[str, Any], result: Dict[str, Any]) -> str:
+    title = _extract_text(_get_fields(params).get("TITLE") or _get_fields(params).get("title"))
+    if title:
+        return f"Создана новая сделка «{title}»."
+    return "Создана новая сделка, она уже доступна в CRM."
+
+
+def _describe_deal_update(params: Dict[str, Any], result: Dict[str, Any]) -> str:
+    fields = _get_fields(params)
+    if fields:
+        friendly_fields = sorted({FRIENDLY_FIELD_NAMES.get(key.upper(), key.lower()) for key in fields.keys()})
+        if friendly_fields:
+            readable = ", ".join(friendly_fields)
+            return f"Обновлена сделка: уточнены {readable}."
+    return "Обновлена информация по сделке."
+
+
+def _describe_list_action(singular: str, plural: str, result: Dict[str, Any]) -> str:
+    count = _extract_count(result)
+    if count is None:
+        return f"Получена информация по {plural}."
+    if count == 0:
+        return f"По вашему запросу {plural} не нашлось."
+    if count == 1:
+        return f"Найдена 1 {singular}."
+    return f"Найдено {count} {plural}."
+
+
+def _describe_activity_add(params: Dict[str, Any], result: Dict[str, Any]) -> str:
+    subject = _extract_text(_get_fields(params).get("SUBJECT"))
+    if subject:
+        return f"Запланировано новое дело «{subject}»."
+    return "Запланировано новое дело."
+
+
+def _describe_timeline_comment(params: Dict[str, Any], result: Dict[str, Any]) -> str:
+    comment = _extract_text(_get_fields(params).get("COMMENT"), limit=80)
+    if comment:
+        return f"Добавлен комментарий: «{comment}»."
+    return "Добавлен комментарий в карточку."
+
+
+def _describe_task_add(params: Dict[str, Any], result: Dict[str, Any]) -> str:
+    title = _extract_text(_get_fields(params).get("TITLE") or _get_fields(params).get("title"))
+    if title:
+        return f"Создана новая задача «{title}»."
+    return "Создана новая задача."
+
+
+def _describe_task_update(params: Dict[str, Any], result: Dict[str, Any]) -> str:
+    fields = _get_fields(params)
+    if fields:
+        friendly_fields = sorted({FRIENDLY_FIELD_NAMES.get(key.upper(), key.lower()) for key in fields.keys()})
+        if friendly_fields:
+            readable = ", ".join(friendly_fields)
+            return f"Обновлена задача: скорректированы {readable}."
+    return "Обновлена информация по задаче."
+
+
+def _describe_task_comment(params: Dict[str, Any], result: Dict[str, Any]) -> str:
+    comment = _extract_text(_get_fields(params).get("POST_MESSAGE"), limit=80)
+    if comment:
+        return f"Оставлен комментарий в задаче: «{comment}»."
+    return "Оставлен комментарий в задаче."
+
+
+def _describe_checklist_item(params: Dict[str, Any], result: Dict[str, Any]) -> str:
+    title = _extract_text(_get_fields(params).get("TITLE"), limit=60)
+    if title:
+        return f"Добавлен пункт чек-листа «{title}»."
+    return "Добавлен новый пункт чек-листа."
+
+
+def _describe_event_bind(params: Dict[str, Any], result: Dict[str, Any]) -> str:
+    event_name = params.get("event") or params.get("EVENT")
+    if isinstance(event_name, str) and event_name.strip():
+        return f"Включено автоматическое уведомление «{event_name.strip()}»."
+    return "Включено новое автоматическое уведомление."
+
+
+def _describe_event_unbind(params: Dict[str, Any], result: Dict[str, Any]) -> str:
+    event_name = params.get("event") or params.get("EVENT")
+    if isinstance(event_name, str) and event_name.strip():
+        return f"Отключено уведомление «{event_name.strip()}»."
+    return "Отключено одно из автоматических уведомлений."
+
+
+def _describe_batch(params: Dict[str, Any], result: Dict[str, Any]) -> str:
+    return "Выполнено несколько действий подряд, результаты проверены."
+
+
+ACTION_DESCRIPTORS: Dict[str, ActionDescriptor] = {
+    "crm.deal.add": _describe_deal_add,
+    "crm.deal.update": _describe_deal_update,
+    "crm.deal.list": lambda params, result: _describe_list_action("сделка", "сделок", result),
+    "crm.deal.get": lambda params, result: "Получены актуальные данные сделки.",
+    "crm.deal.category.list": lambda params, result: _describe_list_action("направление", "направлений", result),
+    "crm.deal.category.stage.list": lambda params, result: _describe_list_action("этап", "этапов", result),
+    "crm.status.list": lambda params, result: _describe_list_action("статус", "статусов", result),
+    "crm.contact.list": lambda params, result: _describe_list_action("контакт", "контактов", result),
+    "crm.contact.get": lambda params, result: "Получены актуальные данные контакта.",
+    "crm.company.list": lambda params, result: _describe_list_action("компания", "компаний", result),
+    "crm.company.get": lambda params, result: "Получены актуальные данные компании.",
+    "crm.activity.list": lambda params, result: _describe_list_action("дело", "дел", result),
+    "crm.activity.add": _describe_activity_add,
+    "crm.timeline.comment.add": _describe_timeline_comment,
+    "tasks.task.add": _describe_task_add,
+    "tasks.task.update": _describe_task_update,
+    "tasks.task.list": lambda params, result: _describe_list_action("задача", "задач", result),
+    "task.commentitem.add": _describe_task_comment,
+    "task.checklistitem.add": _describe_checklist_item,
+    "user.current": lambda params, result: "Проверены данные вашей учётной записи.",
+    "user.get": lambda params, result: _describe_list_action("сотрудник", "сотрудников", result),
+    "sonet.group.get": lambda params, result: "Получена информация о рабочей группе.",
+    "sonet.group.user.get": lambda params, result: _describe_list_action("участник", "участников группы", result),
+    "event.bind": _describe_event_bind,
+    "event.unbind": _describe_event_unbind,
+    "event.get": lambda params, result: _describe_list_action("уведомление", "активных уведомлений", result),
+    "batch": _describe_batch,
 }
 
 RISKY_FIELDS_BY_METHOD = {
@@ -215,7 +417,9 @@ DEFAULT_SYSTEM_PROMPT = (
     " crm.deal.category.stage.list, crm.status.list, crm.activity.list, crm.activity.add, crm.timeline.comment.add,"
     " tasks.task.add, tasks.task.update, tasks.task.list, task.commentitem.add, task.checklistitem.add,"
     " sonet.group.get, sonet.group.user.get, batch, event.bind, event.get, event.unbind. Запрещено использовать любые иные методы.\n"
-    "Перед изменением сумм, стадий, ответственных, дедлайнов указывай requires_confirmation=true и жди подтверждения."
+    "Перед изменением сумм, стадий, ответственных, дедлайнов указывай requires_confirmation=true и жди подтверждения.\n"
+    "В блоке ASSISTANT объясняй шаги простым языком: не упоминай внутренние идентификаторы или названия REST-методов,"
+    " подчеркивай, чем итог полезен пользователю."
 )
 
 
@@ -230,7 +434,7 @@ class OrchestratorSettings:
     """Настройки оркестратора."""
 
     mode: str = "shadow"
-    model_name: str = "gpt-5-thinking"
+    model_name: str = "gpt-4.1"
     system_prompt_template: str = DEFAULT_SYSTEM_PROMPT
 
 
@@ -252,22 +456,51 @@ class Orchestrator:
         self.interaction_logger = interaction_logger
         self.settings = settings
         self.model_client = model_client
+        self._locks_guard = Lock()
+        self._user_locks: Dict[str, Lock] = {}
 
     def process_message(self, user_id: str, message: str) -> str:
-        """Обрабатывает сообщение пользователя и возвращает ответ ассистента.
+        """Обрабатывает сообщение пользователя и возвращает ответ ассистента."""
 
-        Args:
-            user_id: Идентификатор пользователя или сессии.
-            message: Текст запроса.
+        with self._acquire_user_lock(user_id):
+            return self._process_message_locked(user_id, message)
 
-        Returns:
-            Ответ ассистента, который нужно показать пользователю.
-        """
+    @contextmanager
+    def _acquire_user_lock(self, user_id: str):
+        """Гарантирует эксклюзивную обработку сообщений одного пользователя."""
+
+        lock = self._get_user_lock(user_id)
+        lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
+
+    def _get_user_lock(self, user_id: str) -> Lock:
+        """Возвращает (или создаёт) блокировку для конкретного пользователя."""
+
+        sanitized = user_id or "_anonymous"
+        with self._locks_guard:
+            lock = self._user_locks.get(sanitized)
+            if lock is None:
+                lock = Lock()
+                self._user_locks[sanitized] = lock
+            return lock
+
+    def _process_message_locked(self, user_id: str, message: str) -> str:
+        """Реализация обработки запроса под блокировкой конкретного пользователя."""
 
         state = self.state_manager.load_state(user_id)
         if message and (not state.goals or state.goals[0] != message):
             state.goals.insert(0, message)
         logger.debug("Загружено состояние", extra={"user_id": user_id, "state": state})
+
+        self_check_warnings = self._run_context_self_check(state)
+        if self_check_warnings:
+            logger.info(
+                "Self-check обнаружил потенциальные пробелы в контексте",
+                extra={"user_id": user_id, "warnings": self_check_warnings},
+            )
 
         model_response = self._call_model(message, state)
         self.interaction_logger.log_model_response(user_id, message, model_response)
@@ -291,7 +524,10 @@ class Orchestrator:
                     params = raw_params
                 else:
                     errors.append(
-                        f"Шаг {method or 'без имени'} содержит некорректный формат params (ожидается объект)."
+                        self._format_action_error(
+                            method,
+                            "не получилось разобрать параметры. Уточните, что нужно сделать, и я перепланирую шаги.",
+                        )
                     )
                     pending_actions.append(action)
                     continue
@@ -322,16 +558,23 @@ class Orchestrator:
                     )
                     state.confirmations[confirmation_key] = record
                     self._remove_action_from_plan(state, action)
-                    errors.append(f"Шаг {method or 'без имени'} отклонён: {denial_reason}")
+                    errors.append(self._format_action_error(method, denial_reason))
                     continue
 
                 if not method:
-                    errors.append("В ACTION найден шаг без метода")
+                    errors.append(
+                        "Одно из действий не распознано. Опишите задачу подробнее, и я предложу новую последовательность."
+                    )
                     pending_actions.append(action)
                     continue
 
                 if not self._is_action_allowed(method, action):
-                    errors.append(f"Метод {method} запрещён в режиме {self.settings.mode}")
+                    errors.append(
+                        self._format_action_error(
+                            method,
+                            f"это действие недоступно в режиме безопасности {self.settings.mode}.",
+                        )
+                    )
                     pending_actions.append(action)
                     continue
 
@@ -350,13 +593,14 @@ class Orchestrator:
                     record_status = state.confirmations.get(confirmation_key or "", {}).get("status")
                     if record_status == "denied":
                         errors.append(
-                            f"Шаг {method} ранее отклонён: {confirmation_reason}. Сформулируйте новый план, если ситуация изменилась."
+                            self._format_action_error(
+                                method,
+                                f"оно ранее было отклонено: {confirmation_reason}. Если ситуация изменилась, опишите новую формулировку.",
+                            )
                         )
                         self._remove_action_from_plan(state, action)
                         continue
-                    errors.append(
-                        f"Требуется подтверждение: {confirmation_reason}. Ответьте, чтобы агент повторил действие."
-                    )
+                    errors.append(f"{confirmation_reason} Нужна ваша явная команда, чтобы продолжить.")
                     pending_actions.append(action)
                     continue
 
@@ -378,14 +622,42 @@ class Orchestrator:
                     })
                     self._update_state_from_action(state, action, result)
                 except BitrixClientError as exc:
-                    errors.append(str(exc))
+                    logger.warning(
+                        "Ошибка Bitrix24 при выполнении действия",
+                        extra={"method": method, "error": str(exc)},
+                    )
+                    errors.append(
+                        self._format_action_error(
+                            method,
+                            "Bitrix24 временно отклонил запрос. Проверьте данные или повторите попытку позднее.",
+                        )
+                    )
                     pending_actions.append(action)
 
         if self.settings.mode != "shadow":
             state.next_planned_actions = pending_actions
 
-        if errors:
-            assistant_reply += "\n\n" + "\n".join(f"⚠️ {err}" for err in errors)
+        summary_text = self._build_user_summary(executed_actions)
+        assistant_reply = self._merge_reply_with_summary(assistant_reply, summary_text)
+
+        if (
+            self.settings.mode != "shadow"
+            and not executed_actions
+            and not pending_actions
+            and not errors
+            and not actions
+        ):
+            note = (
+                "Сейчас напомнил информацию из ранее выполненных шагов — новые запросы к Bitrix24 не потребовались."
+            )
+            assistant_reply = (
+                f"{assistant_reply}\n\n{note}" if assistant_reply else note
+            )
+
+        if self_check_warnings:
+            errors.extend(self_check_warnings)
+
+        assistant_reply = self._append_errors_to_reply(assistant_reply, errors)
 
         self.state_manager.save_state(user_id, state)
         self.interaction_logger.log_iteration(user_id, message, model_response, state, executed_actions, errors)
@@ -393,10 +665,10 @@ class Orchestrator:
         return assistant_reply or "Не удалось получить ответ от модели."
 
     def _call_model(self, message: str, state: AgentState) -> Dict[str, Any]:
-        """Заглушка вызова GPT-5 Thinking.
+        """Обёртка вызова ChatGPT.
 
-        В реальной реализации здесь будет обращение к API. Пока возвращается
-        заранее подготовленный шаблон ответа.
+        В реальной реализации происходит обращение к API модели. При недоступности
+        клиента возвращается предсказуемый ответ-заглушка.
         """
 
         system_prompt = self.settings.system_prompt_template or DEFAULT_SYSTEM_PROMPT
@@ -474,6 +746,153 @@ class Orchestrator:
             ),
         }
 
+    def _merge_reply_with_summary(self, base: str, summary: str) -> str:
+        """Объединяет исходный ответ модели и краткое резюме."""
+
+        base = (base or "").strip()
+        if summary:
+            if base:
+                return f"{base}\n\n{summary}"
+            return summary
+        return base
+
+    @staticmethod
+    def _append_errors_to_reply(reply: str, errors: List[str]) -> str:
+        """Добавляет блок предупреждений к ответу."""
+
+        if not errors:
+            return reply
+        warning_lines = [f"⚠️ {message}" for message in errors]
+        if reply:
+            return f"{reply}\n\n" + "\n".join(warning_lines)
+        return "\n".join(warning_lines)
+
+    def _format_action_error(self, method: Optional[str], message: str) -> str:
+        """Формирует человеко-понятное описание ошибки действия."""
+
+        friendly = self._friendly_method_name(method)
+        return f"Не удалось выполнить действие «{friendly}»: {message}".strip()
+
+    def _run_context_self_check(self, state: AgentState) -> List[str]:
+        """Проверяет полноту ключевых данных перед обращением к модели."""
+
+        warnings: List[str] = []
+
+        if not state.goals:
+            warnings.append("Пока нет активной цели. Напишите, какую задачу решить.")
+
+        objects = state.objects or {}
+        tracked_ids = [
+            objects.get("current_deal_id"),
+            objects.get("current_contact_id"),
+            objects.get("current_company_id"),
+            objects.get("current_task_id"),
+        ]
+        if not any(tracked_ids):
+            recent_done = [entry.get("object_ids") for entry in state.done[-5:]]
+            if any(obj for obj in recent_done if obj):
+                warnings.append(
+                    "Не удалось определить активные объекты по последним действиям. "
+                    "Напишите, с какой сделкой, задачей или клиентом работать дальше."
+                )
+
+        cutoff = datetime.now(UTC) - timedelta(hours=24)
+        stale_confirmations: List[str] = []
+        for key, record in state.confirmations.items():
+            status = (record or {}).get("status")
+            if status != "requested":
+                continue
+            requested_at = self._parse_iso_datetime((record or {}).get("requested_at"))
+            if requested_at and requested_at < cutoff:
+                description = (record or {}).get("description") or key
+                stale_confirmations.append(description.strip() or key)
+        if stale_confirmations:
+            head = "; ".join(stale_confirmations[:3])
+            tail = " и другие" if len(stale_confirmations) > 3 else ""
+            warnings.append(
+                f"Есть запросы, ожидающие подтверждения: {head}{tail}. "
+                "Сообщите, можно ли продолжить."
+            )
+
+        if any(not (item.get("description") or "").strip() for item in state.in_progress):
+            warnings.append(
+                "Некоторые шаги помечены как «в работе», но без описания. "
+                "Поясните, какой следующий шаг выполнить."
+            )
+
+        return warnings
+
+    def _build_user_summary(self, executed_actions: List[Dict[str, Any]]) -> str:
+        """Создаёт краткое резюме выполненных действий для пользователя."""
+
+        descriptions: List[str] = []
+        for entry in executed_actions:
+            method = entry.get("method")
+            params = entry.get("params") if isinstance(entry.get("params"), dict) else {}
+            result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+            description = self._describe_action_for_user(method, params, result)
+            if description:
+                descriptions.append(description)
+
+        if not descriptions:
+            return ""
+
+        lines = ["Что сделано:"]
+        lines.extend(f"• {item}" for item in descriptions)
+        return "\n".join(lines)
+
+    def _describe_action_for_user(
+        self,
+        method: Optional[str],
+        params: Dict[str, Any],
+        result: Dict[str, Any],
+    ) -> str:
+        """Переводит выполненное действие в человеко-понятный текст."""
+
+        if method and method in ACTION_DESCRIPTORS:
+            descriptor = ACTION_DESCRIPTORS[method]
+            try:
+                return descriptor(params, result)
+            except Exception as exc:  # pragma: no cover - защитный сценарий
+                logger.debug(
+                    "Не удалось построить описание действия",
+                    extra={"method": method, "error": str(exc)},
+                )
+        friendly = self._friendly_method_name(method)
+        return f"Выполнено действие «{friendly}». Результат уже доступен в Bitrix24."
+
+    @staticmethod
+    def _friendly_field_name(field: str) -> str:
+        """Возвращает дружественное название поля Bitrix."""
+
+        return FRIENDLY_FIELD_NAMES.get(field.upper(), field.lower())
+
+    def _friendly_method_name(self, method: Optional[str]) -> str:
+        """Возвращает дружественное название метода Bitrix."""
+
+        if not method:
+            return "запрошенное действие"
+        return FRIENDLY_METHOD_NAMES.get(method, "запрошенное действие")
+
+    @staticmethod
+    def _parse_iso_datetime(raw_value: Optional[str]) -> Optional[datetime]:
+        """Преобразует ISO-строку в datetime для self-check."""
+
+        if not raw_value:
+            return None
+        value = raw_value.strip()
+        if not value:
+            return None
+        try:
+            if value.endswith("Z"):
+                value = value[:-1] + "+00:00"
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            return parsed.astimezone(UTC)
+        except ValueError:
+            return None
+
     def _default_http_method(self, method: str) -> str:
         """Возвращает HTTP-метод по умолчанию для вызова Bitrix."""
 
@@ -489,6 +908,9 @@ class Orchestrator:
             return []
 
         errors: List[str] = []
+        missing_required = False
+        wrong_structure = False
+        empty_values = False
 
         def get_value(path: Tuple[Any, ...]) -> Any:
             current: Any = params
@@ -512,27 +934,35 @@ class Orchestrator:
         for path in spec.get("required", []):
             value = get_value(path)
             if not self._is_value_present(value):
-                errors.append(
-                    f"Метод {method} требует параметр {self._path_to_str(path)}"
-                )
+                missing_required = True
 
         for path in spec.get("dict_fields", []):
             value = get_value(path)
             if value is None:
                 continue
             if not isinstance(value, dict):
-                errors.append(
-                    f"Метод {method} ожидает объект (словарь) в {self._path_to_str(path)}"
-                )
+                wrong_structure = True
 
         for path in spec.get("non_empty", []):
             value = get_value(path)
             if value is None:
                 continue
             if not self._is_value_present(value):
-                errors.append(
-                    f"Метод {method} требует непустое значение {self._path_to_str(path)}"
-                )
+                empty_values = True
+
+        friendly = self._friendly_method_name(method)
+        if missing_required:
+            errors.append(
+                f"Для действия «{friendly}» не хватает обязательных данных. Пожалуйста, уточните детали и повторите запрос."
+            )
+        if wrong_structure:
+            errors.append(
+                f"Для действия «{friendly}» данные нужно передать структурировано (таблица значений). Проверьте формат."
+            )
+        if empty_values:
+            errors.append(
+                f"Для действия «{friendly}» указаны пустые поля. Заполните их, чтобы я мог продолжить."
+            )
 
         return errors
 
@@ -594,7 +1024,8 @@ class Orchestrator:
 
         if method in ALWAYS_CONFIRM_METHODS:
             explicit_request = True
-            reason = reason or f"Управление подпиской через {method}"
+            friendly = self._friendly_method_name(method)
+            reason = reason or f"Для управления уведомлением («{friendly}») нужно ваше подтверждение."
 
         batch_commands: List[BatchCommandInfo] = []
         if method == "batch":
@@ -690,22 +1121,30 @@ class Orchestrator:
             sub_method = command.method
             if not sub_method:
                 confirm = True
-                reasons.append("не удалось определить метод подзапроса")
+                reasons.append("не удалось определить одно из действий в пакете")
                 continue
             if sub_method in ALWAYS_CONFIRM_METHODS:
                 confirm = True
-                reasons.append(f"управление подпиской через {sub_method}")
+                reasons.append(
+                    f"настройка уведомлений («{self._friendly_method_name(sub_method)}» внутри пакета)"
+                )
                 continue
             risky_fields = RISKY_FIELDS_BY_METHOD.get(sub_method, {}).get("fields", set())
             impacted_fields = command.payload_fields() & risky_fields
             if impacted_fields:
                 confirm = True
-                field_list = ", ".join(sorted(impacted_fields))
-                reasons.append(f"изменение полей {field_list} через {sub_method}")
+                field_list = ", ".join(
+                    sorted(self._friendly_field_name(field) for field in impacted_fields)
+                )
+                reasons.append(
+                    f"изменение параметров ({field_list}) в рамках «{self._friendly_method_name(sub_method)}»"
+                )
                 continue
             if sub_method in UPDATE_METHODS and sub_method not in RISKY_FIELDS_BY_METHOD:
                 confirm = True
-                reasons.append(f"использование метода {sub_method} внутри batch")
+                reasons.append(
+                    f"в пакет включено действие «{self._friendly_method_name(sub_method)}», его нужно подтвердить отдельно"
+                )
         if confirm:
             reason_text = "; ".join(dict.fromkeys(reasons)) if reasons else "Пакетный вызов содержит критичные изменения"
         else:
@@ -726,20 +1165,21 @@ class Orchestrator:
     ) -> str:
         """Генерирует описание рискованного действия."""
 
+        friendly_method = self._friendly_method_name(method)
         if not risky_fields:
-            return f"Необходимо подтверждение для вызова {method}"
+            return f"Нужно подтвердить действие «{friendly_method}» — оно влияет на важные данные."
 
         fields_payload = params.get("fields") if isinstance(params.get("fields"), dict) else params
         target_fields: List[str] = []
         if isinstance(fields_payload, dict):
             for field in risky_fields:
                 if field in fields_payload:
-                    target_fields.append(field)
+                    target_fields.append(self._friendly_field_name(field))
 
         if target_fields:
             field_list = ", ".join(sorted(target_fields))
-            return f"Изменение полей {field_list} через {method}"
-        return f"Критичный вызов {method}"
+            return f"Планируется изменить {field_list}. Подтвердите, пожалуйста."
+        return f"Действие «{friendly_method}» затрагивает критичные настройки. Нужна ваша проверка."
 
     def _update_state_from_action(self, state: AgentState, action: Dict[str, Any], result: Dict[str, Any]) -> None:
         """Обновляет `agent_state` на основе выполненного действия."""

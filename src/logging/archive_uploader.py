@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .logger import ArchiveUploadError, ArchiveUploader
+from .logger import ArchiveUploader, ArchiveUploadError
 
 logger = logging.getLogger(__name__)
 

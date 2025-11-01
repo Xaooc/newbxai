@@ -1,7 +1,11 @@
 import json
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List
+from threading import Event
+from typing import Any, Dict, List, Tuple
 
 import pytest
 
@@ -9,7 +13,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from src.logging.logger import InteractionLogger
 from src.orchestrator.agent import Orchestrator, OrchestratorSettings
-from src.state.manager import AgentStateManager
+from src.state.manager import AgentState, AgentStateManager
 
 
 class FakeModelClient:
@@ -96,6 +100,31 @@ def test_shadow_mode_stores_plan_without_calling_bitrix(orchestrator_factory, mo
     assert not state.done
 
 
+def test_user_summary_without_technical_terms(orchestrator_factory):
+    """Резюме действий не должно содержать служебных названий методов."""
+
+    orchestrator = orchestrator_factory("full", build_model_text([], assistant=""))
+
+    summary = orchestrator._build_user_summary(
+        [
+            {
+                "method": "crm.deal.add",
+                "params": {"fields": {"TITLE": "Сделка"}},
+                "result": {"result": {"ID": 10}},
+            },
+            {
+                "method": "crm.timeline.comment.add",
+                "params": {"fields": {"COMMENT": "Примечание"}},
+                "result": {"result": True},
+            },
+        ]
+    )
+
+    assert "crm.deal.add" not in summary
+    assert "crm.timeline.comment.add" not in summary
+    assert summary.startswith("Что сделано:")
+
+
 def test_full_mode_executes_safe_action(orchestrator_factory, monkeypatch):
     """В режиме full безопасный шаг должен выполниться и обновить состояние."""
 
@@ -120,6 +149,9 @@ def test_full_mode_executes_safe_action(orchestrator_factory, monkeypatch):
     reply = orchestrator.process_message("user-2", "Создай сделку")
 
     assert "Сделка создана" in reply
+    assert "Что сделано:" in reply
+    assert "Создана новая сделка" in reply
+    assert "crm.deal.add" not in reply
     assert len(called) == 1
     assert called[0]["method"] == "crm.deal.add"
     assert called[0]["params"]["fields"]["TITLE"] == "Новая сделка"
@@ -128,6 +160,53 @@ def test_full_mode_executes_safe_action(orchestrator_factory, monkeypatch):
     assert state.objects["current_deal_id"] == 555
     assert state.done, "Запись об успешном действии должна быть добавлена"
     assert state.next_planned_actions == []
+
+
+def test_validate_action_params_reports_missing_fields(orchestrator_factory):
+    """Валидация сигнализирует о незаполненных обязательных полях."""
+
+    orchestrator = orchestrator_factory("full", build_model_text([], assistant=""))
+
+    errors = orchestrator._validate_action_params("crm.deal.add", {"fields": {"TITLE": ""}})
+    combined = " ".join(errors)
+    assert "не хватает обязательных данных" in combined
+    assert "пустые поля" in combined
+    assert "crm.deал.add" not in combined
+
+
+def test_validate_action_params_structure_warning(orchestrator_factory):
+    """Если структура параметров неверная, возвращается понятное сообщение."""
+
+    orchestrator = orchestrator_factory("full", build_model_text([], assistant=""))
+
+    errors = orchestrator._validate_action_params("crm.deal.add", {"fields": "plain"})
+    assert any("структурировано" in msg for msg in errors)
+
+
+def test_self_check_warnings_appended_to_reply(orchestrator_factory):
+    """Self-check добавляет предупреждения в ответ пользователю."""
+
+    orchestrator = orchestrator_factory("full", build_model_text([], assistant="Готово"))
+    stale_at = (datetime.now(UTC) - timedelta(days=2)).isoformat().replace("+00:00", "Z")
+    state = AgentState(
+        goals=[],
+        done=[{"description": "Создана сделка", "object_ids": {"deal_id": 5}}],
+        in_progress=[{"description": ""}],
+        confirmations={
+            "deal": {
+                "status": "requested",
+                "requested_at": stale_at,
+                "description": "Утвердить изменение сделки",
+            }
+        },
+    )
+    orchestrator.state_manager.save_state("user-self-check", state)
+
+    reply = orchestrator.process_message("user-self-check", "Нужен отчёт")
+
+    assert "Готово" in reply
+    assert "⚠️" in reply
+    assert "подтверждения" in reply or "активные объекты" in reply or "в работе" in reply
 
 
 def test_confirmation_required_action_not_executed(orchestrator_factory, monkeypatch):
@@ -155,6 +234,8 @@ def test_confirmation_required_action_not_executed(orchestrator_factory, monkeyp
     reply = orchestrator.process_message("user-3", "Измени сумму")
 
     assert "⚠️" in reply
+    assert "Нужна ваша явная команда" in reply
+    assert "crm.deal.update" not in reply
 
     state = orchestrator.state_manager.load_state("user-3")
     assert state.next_planned_actions, "Шаг должен остаться в плане"
@@ -183,7 +264,8 @@ def test_event_bind_requires_confirmation(orchestrator_factory, monkeypatch):
     reply = orchestrator.process_message("user-4", "Подпиши событие")
 
     assert "⚠️" in reply
-    assert "Управление подпиской через event.bind" in reply
+    assert "управления уведомлением" in reply.lower()
+    assert "event.bind" not in reply
     assert called is False, "Без подтверждения вызова Bitrix быть не должно"
 
     state = orchestrator.state_manager.load_state("user-4")
@@ -332,34 +414,6 @@ def test_batch_with_update_requests_confirmation(orchestrator_factory, monkeypat
     state = orchestrator.state_manager.load_state("user-batch-confirm")
     assert state.confirmations
     assert state.next_planned_actions
-
-
-def test_event_bind_requires_confirmation(orchestrator_factory, monkeypatch):
-    """Привязка события требует подтверждения и не вызывается сразу."""
-
-    def fake_call(method: str, params: Dict[str, Any], http_method: str = "POST") -> Dict[str, Any]:
-        raise AssertionError("Не должно быть вызова без подтверждения")
-
-    monkeypatch.setattr("src.orchestrator.agent.call_bitrix", fake_call)
-
-    orchestrator = orchestrator_factory(
-        "full",
-        build_model_text(
-            [
-                {
-                    "method": "event.bind",
-                    "params": {"event": "onCrmDealAdd", "handler": "https://example.test/hook"},
-                }
-            ]
-        ),
-    )
-
-    reply = orchestrator.process_message("user-event", "Подпиши webhook")
-
-    assert "⚠️" in reply
-    state = orchestrator.state_manager.load_state("user-event")
-    assert state.confirmations
-    assert not state.event_bindings
 
 
 def test_event_get_updates_state(orchestrator_factory, monkeypatch):
@@ -541,3 +595,76 @@ def test_interaction_logger_rotation(tmp_path: Path):
     archives = sorted(log_dir.glob("user-logs.jsonl.*.gz"))
     assert archives, "Архивы должны быть созданы"
     assert len(archives) <= 2, "Количество архивов ограничено max_archives"
+
+
+def test_process_message_serializes_same_user(orchestrator_factory, monkeypatch):
+    """Повторные запросы одного пользователя выполняются последовательно."""
+
+    orchestrator = orchestrator_factory("full", build_model_text([], assistant="Готово"))
+    first_enter = Event()
+    second_enter = Event()
+    release = Event()
+    order: List[str] = []
+
+    def fake_call(self, message: str, state: AgentState) -> Dict[str, Any]:  # type: ignore[override]
+        thread_name = threading.current_thread().name
+        order.append(thread_name)
+        if len(order) == 1:
+            first_enter.set()
+            assert release.wait(timeout=1), "Основной поток обработки должен завершиться"
+        else:
+            second_enter.set()
+        return {"THOUGHT": "План", "ACTION": [], "ASSISTANT": "Готово"}
+
+    monkeypatch.setattr(Orchestrator, "_call_model", fake_call)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        future_first = pool.submit(orchestrator.process_message, "user-lock", "первый запрос")
+        assert first_enter.wait(timeout=1)
+        future_second = pool.submit(orchestrator.process_message, "user-lock", "второй запрос")
+        assert not second_enter.wait(timeout=0.2), "Второй запрос не должен стартовать до завершения первого"
+        release.set()
+        assert second_enter.wait(timeout=1)
+        reply_first = future_first.result(timeout=1)
+        reply_second = future_second.result(timeout=1)
+
+    assert reply_first
+    assert reply_second
+    assert len(order) == 2
+    assert order[0] != order[1], "Обработку должны выполнять разные рабочие потоки"
+
+
+def test_process_message_allows_parallel_users(orchestrator_factory, monkeypatch):
+    """Разные пользователи обслуживаются параллельно и не блокируют друг друга."""
+
+    orchestrator = orchestrator_factory("full", build_model_text([], assistant="Готово"))
+    slow_enter = Event()
+    fast_enter = Event()
+    release = Event()
+    order: List[Tuple[str, str]] = []
+
+    def fake_call(self, message: str, state: AgentState) -> Dict[str, Any]:  # type: ignore[override]
+        thread_name = threading.current_thread().name
+        order.append((message, thread_name))
+        if message == "медленный":
+            slow_enter.set()
+            assert release.wait(timeout=1), "Блокировка первого пользователя должна быть снята вручную"
+        else:
+            fast_enter.set()
+        return {"THOUGHT": "План", "ACTION": [], "ASSISTANT": "Готово"}
+
+    monkeypatch.setattr(Orchestrator, "_call_model", fake_call)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        future_slow = pool.submit(orchestrator.process_message, "user-a", "медленный")
+        assert slow_enter.wait(timeout=1)
+        future_fast = pool.submit(orchestrator.process_message, "user-b", "быстрый")
+        assert fast_enter.wait(timeout=0.5), "Другой пользователь должен выполняться параллельно"
+        release.set()
+        reply_fast = future_fast.result(timeout=1)
+        reply_slow = future_slow.result(timeout=1)
+
+    assert reply_slow
+    assert reply_fast
+    assert order[0][0] == "медленный"
+    assert order[1][0] == "быстрый"
