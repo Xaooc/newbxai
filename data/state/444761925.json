@@ -1,0 +1,52 @@
+{
+  "goals": [
+    "подтверждаю",
+    "Какие встречи есть у Ерина Александра на сегодня?"
+  ],
+  "done": [],
+  "in_progress": [],
+  "objects": {
+    "current_deal_id": null,
+    "current_contact_id": null,
+    "current_company_id": null,
+    "current_task_id": null
+  },
+  "next_planned_actions": [
+    {
+      "method": "user.get",
+      "params": {
+        "FILTER": {
+          "FIND": "Ерин Александр"
+        }
+      },
+      "requires_confirmation": false,
+      "confirmed": true
+    }
+  ],
+  "plan_confirmation": {
+    "status": "pending",
+    "hash": "a1a7812fa124a098114e94eccd2273ae",
+    "requested_at": "2025-11-01T14:13:48.670620Z",
+    "approved_at": null,
+    "denied_at": null,
+    "summary": "1) поиск сотрудника",
+    "steps": [
+      {
+        "method": "user.get",
+        "params": {
+          "FILTER": {
+            "FIND": "Ерин Александр"
+          }
+        },
+        "requires_confirmation": false,
+        "confirmed": true
+      }
+    ],
+    "step_keys": [
+      "376617c8922bcc07a996955d58e19a83"
+    ],
+    "approved_step_keys": []
+  },
+  "confirmations": {},
+  "event_bindings": []
+}

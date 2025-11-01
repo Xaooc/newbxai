@@ -14,8 +14,38 @@ from src.orchestrator.context_builder import build_state_summary
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_MODEL_NAME = "gpt-4.1"
+DEFAULT_MODEL_NAME = "gpt-5"
 MODEL_ENV_VAR = "OPENAI_MODEL"
+
+METHODS_CHEATSHEET = (
+    "user.current — данные владельца вебхука.\n"
+    "user.get — поиск сотрудников по имени, отделу, e-mail; не использовать для клиентов.\n"
+    "crm.contact.list — поиск клиентов CRM по имени, телефону, e-mail.\n"
+    "crm.contact.get — карточка клиента по ID.\n"
+    "crm.company.list — поиск компаний по отрасли, ответственному, признакам.\n"
+    "crm.company.get — карточка компании по ID.\n"
+    "crm.deal.list — список сделок (фильтры: менеджер, стадия, направление, сумма).\n"
+    "crm.deal.get — карточка сделки по ID.\n"
+    "crm.deal.add — создание сделки (TITLE обязателен, суммы/ответственные требуют подтверждения).\n"
+    "crm.deal.update — обновление сделки (id + fields).\n"
+    "crm.deal.category.list — воронки продаж.\n"
+    "crm.deal.category.stage.list — стадии выбранной воронки.\n"
+    "crm.status.list — элементы справочников CRM (ENTITY_ID обязателен).\n"
+    "crm.activity.list — список дел (фильтры по OWNER_TYPE_ID/OWNER_ID рекомендуется).\n"
+    "crm.activity.add — создать дело (OWNER_TYPE_ID, OWNER_ID, TYPE_ID, SUBJECT).\n"
+    "crm.timeline.comment.add — добавить комментарий к сущности CRM.\n"
+    "tasks.task.add — создать задачу (TITLE, DESCRIPTION, RESPONSIBLE_ID).\n"
+    "tasks.task.update — изменить задачу (taskId + fields).\n"
+    "tasks.task.list — поиск задач по фильтрам (RESPONSIBLE_ID, STATUS и др.).\n"
+    "task.commentitem.add — комментарий к задаче (taskId, POST_MESSAGE).\n"
+    "task.checklistitem.add — пункт чек-листа (taskId, TITLE).\n"
+    "sonet.group.get — сведения о рабочей группе/проекте.\n"
+    "sonet.group.user.get — участники группы (GROUP_ID).\n"
+    "batch — пакет до 50 команд (cmd обязательный, наследует ограничения).\n"
+    "event.bind — подписка на событие (event, handler, требует подтверждения).\n"
+    "event.get — перечень активных подписок.\n"
+    "event.unbind — снять подписку (event, handler, требует подтверждения)."
+)
 
 
 class ModelClientError(Exception):
@@ -94,15 +124,18 @@ class ModelClient:
             "Текущее состояние агента (JSON):\n"
             f"```json\n{state_json}\n```"
         )
+        methods_block = "Описание доступных методов:\n" + METHODS_CHEATSHEET
+        user_payload = (
+            f"{state_block}\n\n"
+            f"{methods_block}\n\n"
+            f"Запрос пользователя: {user_message}\n\n"
+            "Сформируй ответ строго с блоками THOUGHT:/ACTION:/ASSISTANT:."
+        )
         return [
             {"role": "system", "content": system_prompt},
             {
                 "role": "user",
-                "content": (
-                    f"{state_block}\n\n"
-                    f"Запрос пользователя: {user_message}\n\n"
-                    "Сформируй ответ строго с блоками THOUGHT:/ACTION:/ASSISTANT:."
-                ),
+                "content": user_payload,
             },
         ]
 

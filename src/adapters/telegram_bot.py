@@ -26,6 +26,40 @@ logger = logging.getLogger(__name__)
 TELEGRAM_MESSAGE_LIMIT = 4096
 
 
+def _patch_python_telegram_bot() -> None:
+    """РџР°С‚С‡РёС‚ РјРµР¶РґСѓРІРµСЂСЃРёРѕРЅРЅСѓСЋ РѕС€РёР±РєСѓ telegram.ext Updater."""
+
+    try:
+        from telegram.ext._updater import Updater
+    except Exception:  # noqa: BLE001 - РЅРµСѓРґР°С‡Р° РґРѕРїСѓСЃРєР°РµС‚ СЂР°Р±РѕС‚Сѓ Р±РµР· РїР°С‚С‡Р°
+        return
+
+    storage_attr = "_patched_polling_cleanup_cb_storage"
+    storage = getattr(Updater, storage_attr, None)
+    if storage is None:
+        storage = {}
+        setattr(Updater, storage_attr, storage)
+
+    current_descriptor = getattr(Updater, "_Updater__polling_cleanup_cb", None)
+    if isinstance(current_descriptor, property):
+        return
+
+    def _getter(self):
+        return storage.get(id(self))
+
+    def _setter(self, value):
+        if value is None:
+            storage.pop(id(self), None)
+        else:
+            storage[id(self)] = value
+
+    def _deleter(self):
+        storage.pop(id(self), None)
+
+    setattr(Updater, "_Updater__polling_cleanup_cb", property(_getter, _setter, _deleter))
+
+
+
 @dataclass
 class TelegramBotConfig:
     """Настройки Telegram-бота."""
@@ -62,6 +96,7 @@ class TelegramBotAdapter:
     def run(self) -> None:
         """Запускает polling-бота."""
 
+        _patch_python_telegram_bot()
         application = ApplicationBuilder().token(self._config.token).build()
 
         application.add_handler(CommandHandler("start", self._handle_start))

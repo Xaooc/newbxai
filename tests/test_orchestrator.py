@@ -34,6 +34,22 @@ class FakeModelClient:
         return self._response_text
 
 
+class SequenceModelClient:
+    """Модель, которая последовательно выдаёт подготовленные ответы."""
+
+    def __init__(self, responses: List[str]) -> None:
+        self._responses = responses
+        self._index = 0
+
+    def generate(self, system_prompt: str, state_snapshot: Dict[str, Any], user_message: str) -> str:  # noqa: D401
+        if self._index < len(self._responses):
+            response = self._responses[self._index]
+        else:
+            response = self._responses[-1]
+        self._index += 1
+        return response
+
+
 @pytest.fixture()
 def orchestrator_factory(tmp_path: Path):
     """Фабрика оркестратора для тестов."""
@@ -100,6 +116,167 @@ def test_shadow_mode_stores_plan_without_calling_bitrix(orchestrator_factory, mo
     assert not state.done
 
 
+def test_plan_executes_after_confirmation(orchestrator_factory, monkeypatch):
+    """После подтверждения план в рабочем режиме должен выполниться."""
+
+    called: List[Tuple[str, Dict[str, Any]]] = []
+
+    def fake_call(method: str, params: Dict[str, Any], http_method: str = "POST") -> Dict[str, Any]:
+        called.append((method, params))
+        return {"result": {"ID": 77}}
+
+    monkeypatch.setattr("src.orchestrator.agent.call_bitrix", fake_call)
+
+    orchestrator = orchestrator_factory(
+        "full",
+        build_model_text([
+            {"method": "crm.deal.add", "params": {"fields": {"TITLE": "Новая сделка"}}}
+        ], assistant="План подготовлен"),
+    )
+
+    reply_plan = orchestrator.process_message("user-2", "Создай сделку")
+    assert "План подготовлен" in reply_plan
+    assert not called
+
+    reply_execute = orchestrator.process_message("user-2", "подтверждаю план")
+    assert called == [
+        ("crm.deal.add", {"fields": {"TITLE": "Новая сделка"}})
+    ], "Шаг плана должен быть выполнен после подтверждения"
+    assert "План подтверждён" in reply_execute
+    assert "crm.deal.add" not in reply_execute, "Ответ не должен содержать технических деталей"
+
+    state = orchestrator.state_manager.load_state("user-2")
+    assert not state.next_planned_actions, "План очищается после выполнения"
+    assert state.done, "Результат записывается в историю done"
+    assert state.goals and state.goals[0] == "Создай сделку", "Подтверждение не добавляется в цели"
+
+
+def test_plan_confirmation_executes_without_model_confirmed_flag(orchestrator_factory, monkeypatch):
+    """После одобрения план выполняется, даже если модель не добавила confirmed и изменила комментарий."""
+    actions = [
+        {
+            "method": "crm.deal.add",
+            "params": {"fields": {"TITLE": "Без повтора"}},
+            "requires_confirmation": True,
+            "comment": "создаём сделку",
+        }
+    ]
+    followup_actions = [
+        {
+            "method": "crm.deal.add",
+            "params": {"fields": {"TITLE": "Без повтора"}},
+            "requires_confirmation": True,
+            "comment": "повторяю план: создаём сделку",
+        }
+    ]
+    responses = [
+        build_model_text(actions, assistant="План подготовлен, подтвердите выполнение"),
+        build_model_text(followup_actions, assistant="Приступаю к выполнению"),
+    ]
+
+    orchestrator = orchestrator_factory("full", responses[0])
+    orchestrator.model_client = SequenceModelClient(responses)
+
+    called: List[Tuple[str, Dict[str, Any]]] = []
+
+    def fake_call(method: str, params: Dict[str, Any], http_method: str = "POST") -> Dict[str, Any]:
+        called.append((method, params))
+        return {"result": {"ID": 501}}
+
+    monkeypatch.setattr("src.orchestrator.agent.call_bitrix", fake_call)
+
+    reply_plan = orchestrator.process_message("user-loop", "Создай сделку без повтора")
+    assert "План" in reply_plan
+    assert not called
+
+    reply_confirm = orchestrator.process_message("user-loop", "подтверждаю план")
+    assert called == [("crm.deal.add", {"fields": {"TITLE": "Без повтора"}})]
+    assert "подтвердите" not in reply_confirm.lower(), "Ответ не должен повторно просить подтверждение"
+
+    state = orchestrator.state_manager.load_state("user-loop")
+    assert not state.next_planned_actions
+    plan_record = state.plan_confirmation or {}
+    assert plan_record.get("status") == "approved"
+    assert not plan_record.get("steps"), "После выполнения шаги плана не должны оставаться в очереди"
+
+
+def test_plan_subset_after_confirmation_executes_first_step(orchestrator_factory, monkeypatch):
+    """Модель может выполнять план по шагам без повторного запроса подтверждения."""
+
+    full_plan = [
+        {
+            "method": "user.get",
+            "params": {"filter": {"NAME": "Ерин Александр"}},
+            "requires_confirmation": True,
+            "comment": "найду сотрудника",
+        },
+        {
+            "method": "crm.activity.list",
+            "params": {"filter": {"OWNER_ID": 123, "TYPE_ID": "MEETING"}},
+            "requires_confirmation": True,
+            "comment": "получу встречи",
+        },
+    ]
+    partial_plan = [
+        {
+            "method": "user.get",
+            "params": {"filter": {"NAME": "Ерин Александр"}},
+            "requires_confirmation": True,
+            "comment": "шаг 1 — поиск сотрудника",
+        }
+    ]
+    responses = [
+        build_model_text(full_plan, assistant="План подготовлен"),
+        build_model_text(partial_plan, assistant="Приступаю к выполнению плана"),
+    ]
+
+    orchestrator = orchestrator_factory("full", responses[0])
+    orchestrator.model_client = SequenceModelClient(responses)
+
+    called: List[Tuple[str, Dict[str, Any]]] = []
+
+    def fake_call(method: str, params: Dict[str, Any], http_method: str = "POST") -> Dict[str, Any]:
+        called.append((method, params, http_method))
+        return {"result": [{"ID": 321}]}
+
+    monkeypatch.setattr("src.orchestrator.agent.call_bitrix", fake_call)
+
+    reply_plan = orchestrator.process_message("user-subset", "Найди встречи сотрудника")
+    assert "План" in reply_plan
+    assert not called
+
+    reply_confirm = orchestrator.process_message("user-subset", "подтверждаю план")
+    assert called and called[0][0] == "user.get"
+    assert "подтвердите" not in reply_confirm.lower()
+
+    state = orchestrator.state_manager.load_state("user-subset")
+    plan_record = state.plan_confirmation or {}
+    assert plan_record.get("status") == "approved"
+    assert plan_record.get("approved_step_keys"), "Ключи подтверждённых шагов должны сохраняться"
+
+
+def test_missing_data_prompt_lists_required_fields(orchestrator_factory):
+    """При нехватке данных агент перечисляет поля и просит их указать."""
+
+    orchestrator = orchestrator_factory(
+        "full",
+        build_model_text([
+            {"method": "crm.deal.add", "params": {}}
+        ]),
+    )
+
+    orchestrator.process_message("user-missing", "Создай сделку")
+    reply = orchestrator.process_message("user-missing", "подтверждаю план")
+
+    normalized = reply.lower()
+    assert "не хватает обязательных данных" in normalized
+    assert "поле «название»" in normalized or "поле «title»" in normalized
+    assert "укажите их" in normalized
+
+    state = orchestrator.state_manager.load_state("user-missing")
+    assert state.next_planned_actions == [{"method": "crm.deal.add", "params": {}}]
+
+
 def test_user_summary_without_technical_terms(orchestrator_factory):
     """Резюме действий не должно содержать служебных названий методов."""
 
@@ -146,7 +323,11 @@ def test_full_mode_executes_safe_action(orchestrator_factory, monkeypatch):
         assistant="Сделка создана"),
     )
 
-    reply = orchestrator.process_message("user-2", "Создай сделку")
+    reply_plan = orchestrator.process_message("user-2", "Создай сделку")
+    assert "План действий" in reply_plan
+    assert len(called) == 0
+
+    reply = orchestrator.process_message("user-2", "подтверждаю план")
 
     assert "Сделка создана" in reply
     assert "Что сделано:" in reply
@@ -163,24 +344,25 @@ def test_full_mode_executes_safe_action(orchestrator_factory, monkeypatch):
 
 
 def test_validate_action_params_reports_missing_fields(orchestrator_factory):
-    """Валидация сигнализирует о незаполненных обязательных полях."""
+    """Проверяет подсказки и список недостающих полей."""
 
     orchestrator = orchestrator_factory("full", build_model_text([], assistant=""))
 
-    errors = orchestrator._validate_action_params("crm.deal.add", {"fields": {"TITLE": ""}})
-    combined = " ".join(errors)
+    messages, missing_paths = orchestrator._validate_action_params("crm.deal.add", {"fields": {"TITLE": ""}})
+    combined = " ".join(messages).lower()
     assert "не хватает обязательных данных" in combined
     assert "пустые поля" in combined
-    assert "crm.deал.add" not in combined
+    assert missing_paths, "Ожидается список путей с отсутствующими данными"
 
 
 def test_validate_action_params_structure_warning(orchestrator_factory):
-    """Если структура параметров неверная, возвращается понятное сообщение."""
+    """Если структура параметров некорректна, оркестратор просит перепроверить."""
 
     orchestrator = orchestrator_factory("full", build_model_text([], assistant=""))
 
-    errors = orchestrator._validate_action_params("crm.deal.add", {"fields": "plain"})
-    assert any("структурировано" in msg for msg in errors)
+    messages, _ = orchestrator._validate_action_params("crm.deal.add", {"fields": "plain"})
+    combined = " ".join(messages).lower()
+    assert "структур" in combined or "формат" in combined
 
 
 def test_self_check_warnings_appended_to_reply(orchestrator_factory):
@@ -231,7 +413,8 @@ def test_confirmation_required_action_not_executed(orchestrator_factory, monkeyp
         ),
     )
 
-    reply = orchestrator.process_message("user-3", "Измени сумму")
+    orchestrator.process_message("user-3", "Измени сумму")
+    reply = orchestrator.process_message("user-3", "подтверждаю план")
 
     assert "⚠️" in reply
     assert "Нужна ваша явная команда" in reply
@@ -261,8 +444,10 @@ def test_event_bind_requires_confirmation(orchestrator_factory, monkeypatch):
 
     orchestrator = orchestrator_factory("full", build_model_text([action]))
 
-    reply = orchestrator.process_message("user-4", "Подпиши событие")
-
+    reply_plan = orchestrator.process_message("user-4", "Подпиши событие")
+    assert "План" in reply_plan
+    assert called is False
+    reply = orchestrator.process_message("user-4", "подтверждаю план")
     assert "⚠️" in reply
     assert "управления уведомлением" in reply.lower()
     assert "event.bind" not in reply
@@ -316,7 +501,9 @@ def test_batch_updates_event_bindings_after_confirmation(orchestrator_factory, m
 
     orchestrator = orchestrator_factory("full", build_model_text([action]))
 
-    reply = orchestrator.process_message("user-5", "Обнови подписки")
+    reply_plan = orchestrator.process_message("user-5", "Обнови подписки")
+    assert "План" in reply_plan
+    reply = orchestrator.process_message("user-5", "подтверждаю план")
 
     assert "Готово" in reply
     assert len(captured) == 1
@@ -336,8 +523,8 @@ def test_batch_updates_event_bindings_after_confirmation(orchestrator_factory, m
 
 
 
-def test_batch_read_commands_execute_without_confirmation(orchestrator_factory, monkeypatch):
-    """Пакет с чтением в canary должен выполниться без подтверждения."""
+def test_batch_read_commands_execute_after_plan_confirmation(orchestrator_factory, monkeypatch):
+    """Пакет с чтением в canary выполняется после подтверждения плана."""
 
     captured: List[Dict[str, Any]] = []
 
@@ -373,7 +560,9 @@ def test_batch_read_commands_execute_without_confirmation(orchestrator_factory, 
         ),
     )
 
-    reply = orchestrator.process_message("user-batch", "Сделай пакет чтения")
+    reply_plan = orchestrator.process_message("user-batch", "Сделай пакет чтения")
+    assert "План действий" in reply_plan
+    reply = orchestrator.process_message("user-batch", "подтверждаю план")
 
     assert "Готово" in reply
     assert len(captured) == 1
@@ -407,8 +596,9 @@ def test_batch_with_update_requests_confirmation(orchestrator_factory, monkeypat
         ),
     )
 
-    reply = orchestrator.process_message("user-batch-confirm", "Обнови сделку через batch")
-
+    reply_plan = orchestrator.process_message("user-batch-confirm", "Обнови сделку через batch")
+    assert "План действий" in reply_plan
+    reply = orchestrator.process_message("user-batch-confirm", "подтверждаю план")
     assert "⚠️" in reply
 
     state = orchestrator.state_manager.load_state("user-batch-confirm")
@@ -443,8 +633,8 @@ def test_event_get_updates_state(orchestrator_factory, monkeypatch):
         ),
     )
 
-    reply = orchestrator.process_message("user-event-list", "Покажи подписки")
-
+    orchestrator.process_message("user-event-list", "Покажи подписки")
+    reply = orchestrator.process_message("user-event-list", "подтверждаю план")
     assert "Готово" in reply
     state = orchestrator.state_manager.load_state("user-event-list")
     assert state.event_bindings == [
@@ -478,8 +668,8 @@ def test_crm_status_list_updates_done_history(orchestrator_factory, monkeypatch)
         ),
     )
 
-    reply = orchestrator.process_message("user-status", "Покажи статусы сделок")
-
+    orchestrator.process_message("user-status", "Покажи статусы сделок")
+    reply = orchestrator.process_message("user-status", "подтверждаю план")
     assert "Получены статусы" in reply
 
     state = orchestrator.state_manager.load_state("user-status")
@@ -520,8 +710,8 @@ def test_crm_deal_category_reads_append_done(orchestrator_factory, monkeypatch):
         ),
     )
 
-    reply = orchestrator.process_message("user-categories", "Какие направления и стадии есть?")
-
+    orchestrator.process_message("user-categories", "Какие направления и стадии есть?")
+    reply = orchestrator.process_message("user-categories", "подтверждаю план")
     assert "Данные по направлениям и стадиям получены" in reply
 
     state = orchestrator.state_manager.load_state("user-categories")
@@ -564,8 +754,8 @@ def test_sonet_group_reads_update_done(orchestrator_factory, monkeypatch):
         ),
     )
 
-    reply = orchestrator.process_message("user-groups", "Покажи рабочие группы и участников")
-
+    orchestrator.process_message("user-groups", "Покажи рабочие группы и участников")
+    reply = orchestrator.process_message("user-groups", "подтверждаю план")
     assert "Информация о группах и участниках подготовлена" in reply
 
     state = orchestrator.state_manager.load_state("user-groups")

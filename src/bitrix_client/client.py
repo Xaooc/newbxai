@@ -12,7 +12,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 import requests
 
@@ -20,6 +20,20 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_WEBHOOK_URL = "https://portal.magnitmedia.ru/rest/132/1s0mz4mw8d42bfvk/"
+SENSITIVE_PARAM_KEYS = (
+    "token",
+    "secret",
+    "password",
+    "auth",
+    "key",
+    "nonce",
+    "login",
+    "email",
+    "phone",
+    "handler",
+)
+REDACTED_VALUE = "***redacted***"
+MAX_STRING_LENGTH = 256
 
 
 class BitrixClientError(Exception):
@@ -132,3 +146,49 @@ def call_bitrix(
 
     active_client = client or build_default_client()
     return active_client.call_method(method, params, http_method=http_method)
+
+
+def sanitize_for_logging(payload: Any, *, _depth: int = 0, _visited: Optional[Set[int]] = None) -> Any:
+    """РЈРґР°Р»СЏРµС‚ С‡СѓРІСЃС‚РІРёС‚РµР»СЊРЅС‹Рµ РґР°РЅРЅС‹Рµ Рё РѕРіСЂР°РЅРёС‡РёРІР°РµС‚ РґР»РёРЅСѓ СЃС‚СЂРѕРє РґР»СЏ Р»РѕРіРѕРІ."""
+
+    max_depth = 5
+    if _depth > max_depth:
+        return "<truncated>"
+
+    if _visited is None:
+        _visited = set()
+
+    obj_id = id(payload)
+    if obj_id in _visited:
+        return "<recursion>"
+    _visited.add(obj_id)
+
+    if isinstance(payload, dict):
+        sanitized: Dict[str, Any] = {}
+        for key, value in payload.items():
+            key_str = str(key)
+            if any(token in key_str.lower() for token in SENSITIVE_PARAM_KEYS):
+                sanitized[key_str] = REDACTED_VALUE
+            else:
+                sanitized[key_str] = sanitize_for_logging(value, _depth=_depth + 1, _visited=_visited)
+        return sanitized
+
+    if isinstance(payload, list):
+        return [sanitize_for_logging(item, _depth=_depth + 1, _visited=_visited) for item in payload]
+
+    if isinstance(payload, tuple):
+        return tuple(sanitize_for_logging(item, _depth=_depth + 1, _visited=_visited) for item in payload)
+
+    if isinstance(payload, set):
+        return {sanitize_for_logging(item, _depth=_depth + 1, _visited=_visited) for item in payload}
+
+    if isinstance(payload, bytes):
+        return f"<bytes:{len(payload)}>"
+
+    if isinstance(payload, str):
+        stripped = payload.strip()
+        if len(stripped) > MAX_STRING_LENGTH:
+            return f"{stripped[:MAX_STRING_LENGTH]}…"
+        return stripped
+
+    return payload

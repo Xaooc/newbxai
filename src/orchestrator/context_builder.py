@@ -29,6 +29,20 @@ def build_state_summary(state_snapshot: Dict[str, Any], limit: int = DEFAULT_SUM
     else:
         lines.append("Активных целей нет — ожидаю новую задачу.")
 
+    plan = state_snapshot.get("plan_confirmation") or {}
+    plan_status = (plan.get("status") or "").lower()
+    plan_summary = _safe_text(plan.get("summary")) if plan.get("summary") else ""
+    if plan_status == "pending":
+        details = plan_summary or "ожидает подтверждения"
+        lines.append(f"План ожидает подтверждения: {details}.")
+    elif plan_status == "approved":
+        if plan_summary:
+            lines.append(f"План подтверждён: {plan_summary}.")
+        else:
+            lines.append("План подтверждён и выполняется.")
+    elif plan_status == "denied":
+        lines.append("Последний план был отклонён и ожидает обновления.")
+
     in_progress = _as_list(state_snapshot.get("in_progress"))
     if in_progress:
         items = "; ".join(
