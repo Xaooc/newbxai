@@ -5,6 +5,16 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from pathlib import Path
+
+# При запуске `python src/main_entrypoint.py` интерпретатор устанавливает sys.path
+# в каталог `src`, поэтому пакет `src.*` становится недоступен. Добавляем корень
+# проекта вручную, чтобы импорты работали в обоих сценариях запуска.
+if __package__ in {None, ""}:
+    project_root = Path(__file__).resolve().parent.parent
+    root_str = str(project_root)
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
 
 from src.app import launch_telegram_bot
 
