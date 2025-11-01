@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from hashlib import md5
 from threading import Lock
@@ -13,10 +13,11 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs
 
 from src.bitrix_client.client import BitrixClientError, call_bitrix
-from src.logging.logger import InteractionLogger
+from src.app_logging.logger import InteractionLogger
 from src.orchestrator.model_client import (
     ModelClient,
     ModelClientError,
+    resolve_model_name,
 )
 from src.state.manager import AgentState, AgentStateManager
 
@@ -429,12 +430,18 @@ def _utc_iso_z() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
+def _default_model_name() -> str:
+    """Читает имя модели из окружения или возвращает значение по умолчанию."""
+
+    return resolve_model_name(None)
+
+
 @dataclass
 class OrchestratorSettings:
     """Настройки оркестратора."""
 
     mode: str = "shadow"
-    model_name: str = "gpt-4.1"
+    model_name: str = field(default_factory=_default_model_name)
     system_prompt_template: str = DEFAULT_SYSTEM_PROMPT
 
 

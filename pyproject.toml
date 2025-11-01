@@ -17,6 +17,6 @@ explicit_package_bases = true
 module = [
     "src.orchestrator.*",
     "src.bitrix_client.*",
-    "src.logging.archive_uploader",
+    "src.app_logging.archive_uploader",
 ]
 ignore_errors = true
