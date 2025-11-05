@@ -1,6 +1,0 @@
-{
-  "method": "user.current",
-  "required": [],
-  "properties": {},
-  "description": "Возвращает профиль текущего пользователя Bitrix24."
-}
