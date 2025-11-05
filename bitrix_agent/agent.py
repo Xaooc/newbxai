@@ -71,8 +71,18 @@ class BitrixAutonomousAgent:
             raw_goal=prompt,
             steps=steps,
         )
-        for step in steps:
+        if steps:
+            plan_lines = "\n".join(
+                f"{index}. {step.description}" for index, step in enumerate(steps, start=1)
+            )
+            self.io.notify(f"Построен план работы:\n{plan_lines}")
+        else:
+            self.io.notify("План пустой, агент выполнит цель напрямую.")
+
+        total_steps = len(steps)
+        for index, step in enumerate(steps, start=1):
             self.memory.next = step.description
+            self.io.notify(f"Шаг {index}/{total_steps}: {step.description}")
             handler = self._handlers.get(step.action, self._handle_generic_action)
             try:
                 result = handler(step)
@@ -96,9 +106,12 @@ class BitrixAutonomousAgent:
             if result:
                 context.outputs.append(result)
             self.memory.mark_step_done(step.description)
+            self.io.notify(f"Шаг завершён: {step.description}")
         context.report = self._build_report()
         if context.report:
-            self.io.notify(context.report)
+            self.io.notify(f"Итоговый отчёт:\n{context.report}")
+        else:
+            self.io.notify("Агент завершил работу, отчёт не сформирован.")
         return {
             "memory": self.memory.to_json(),
             "results": context.outputs,
