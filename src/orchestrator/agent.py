@@ -662,6 +662,10 @@ class Orchestrator:
 
         self.state_manager.save_state(user_id, state)
         self.interaction_logger.log_iteration(user_id, message, model_response, state, executed_actions, errors)
+        logger.info(
+            "Финальный ответ ассистента",
+            extra={"assistant_reply": assistant_reply or ""},
+        )
 
         return assistant_reply or "Не удалось получить ответ от модели. Попробуйте повторить запрос позже."
     def _call_model(self, message: str, state: AgentState) -> Dict[str, Any]:
@@ -678,7 +682,15 @@ class Orchestrator:
 
         try:
             raw_text = self.model_client.generate(system_prompt, state.to_dict(), message)
+            logger.info(
+                "Ответ модели (raw)",
+                extra={"response": raw_text},
+            )
             parsed = self._parse_model_output(raw_text)
+            logger.info(
+                "Ответ модели (parsed)",
+                extra={"parsed": parsed},
+            )
             return parsed
         except ModelClientError as exc:
             logger.warning("Ошибка GPT-клиента", extra={"error": str(exc)})

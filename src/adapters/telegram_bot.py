@@ -9,7 +9,7 @@ import os
 import queue
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import Any, List, Optional, Set
 
 from src.adapters.adaptive_executor import AdaptiveThreadPoolExecutor
 from src.orchestrator.agent import Orchestrator
@@ -26,6 +26,39 @@ from telegram.ext import (
 logger = logging.getLogger(__name__)
 
 TELEGRAM_MESSAGE_LIMIT = 4096
+
+
+def _patch_python_telegram_bot_for_python313() -> None:
+    """Work around Updater slots bug in python-telegram-bot 20.x on Python 3.13."""
+
+    try:
+        from telegram.ext._updater import Updater
+    except Exception:  # pragma: no cover - defensive guard for optional dependency
+        return
+
+    sentinel_attr = "_bitrix24x_polling_cleanup_storage"
+    if hasattr(Updater, sentinel_attr):
+        return
+
+    storage: dict[int, object] = {}
+
+    class _CleanupDescriptor:
+        def __get__(self, instance: Optional[object], owner: Any) -> object:
+            if instance is None:
+                return self
+            return storage.get(id(instance))
+
+        def __set__(self, instance: object, value: object) -> None:
+            storage[id(instance)] = value
+
+        def __delete__(self, instance: object) -> None:
+            storage.pop(id(instance), None)
+
+    setattr(Updater, "_Updater__polling_cleanup_cb", _CleanupDescriptor())
+    setattr(Updater, sentinel_attr, storage)
+
+
+_patch_python_telegram_bot_for_python313()
 
 
 

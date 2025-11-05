@@ -78,10 +78,15 @@ class BitrixClient:
             raise BitrixClientError("Не задан URL вебхука Bitrix24")
 
         payload = params or {}
+        sanitized_payload = sanitize_for_logging(payload)
         url = f"{self.webhook_url.rstrip('/')}/{method}.json"
         logger.debug(
             "Выполняем вызов Bitrix24",
-            extra={"method": method, "params": payload, "http_method": http_method},
+            extra={"method": method, "params": sanitized_payload, "http_method": http_method},
+        )
+        logger.info(
+            "Запрос к Bitrix24",
+            extra={"method": method, "params": sanitized_payload, "http_method": http_method},
         )
 
         http_method = http_method.upper()
@@ -107,6 +112,14 @@ class BitrixClient:
                 f"Не удалось декодировать ответ Bitrix24 как JSON: {response.text}"
             ) from exc
 
+        logger.info(
+            "Ответ от Bitrix24",
+            extra={
+                "method": method,
+                "status_code": response.status_code,
+                "response": sanitize_for_logging(data),
+            },
+        )
         if "error" in data:
             raise BitrixClientError(
                 f"Bitrix24 сообщил об ошибке: {data['error']} — {data.get('error_description', 'нет описания')}"

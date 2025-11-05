@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from src.adapters.telegram_bot import TelegramBotAdapter, TelegramBotConfig
 
 from src.config import load_env_file
+from src.app_logging import setup_logging
 from src.app_logging.logger import build_interaction_logger
 from src.orchestrator.agent import Orchestrator, OrchestratorSettings
 from src.orchestrator.model_client import ModelClientError, build_default_model_client
@@ -80,6 +81,7 @@ def _prepare_bot_dependencies(env_path: str | Path | None) -> Tuple[Orchestrator
         load_env_file(env_path)
 
     config = _build_config_from_env()
+    setup_logging(log_dir=config.log_dir)
     orchestrator = build_orchestrator(config.mode, config.state_dir, config.log_dir)
     return orchestrator, config
 

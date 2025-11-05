@@ -6,15 +6,18 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
 from src.orchestrator.context_builder import build_state_summary
 
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_MODEL_NAME = "gpt-5"
+DEFAULT_MODEL_NAME = "gpt-4.1"
 MODEL_ENV_VAR = "OPENAI_MODEL"
 
 METHODS_CHEATSHEET = (
@@ -59,12 +62,33 @@ class ModelClient:
     model_name: str = DEFAULT_MODEL_NAME
     api_key: Optional[str] = None
     base_url: str = "https://api.openai.com/v1"
-    timeout: int = 60
-    temperature: float = 0.1
+    timeout: float = 60.0
+    max_retries: int = 3
+    retry_backoff_factor: float = 1.0
+    retry_statuses: Tuple[int, ...] = (429, 500, 502, 503, 504)
+    temperature: float = 1
 
     def __post_init__(self) -> None:
         if self.api_key is None:
-            raise ModelClientError("Не задан API-ключ ChatGPT (переменная OPENAI_API_KEY)")
+            raise ModelClientError("ChatGPT API key is missing (set OPENAI_API_KEY)")
+
+        self.timeout = self._normalize_timeout(self.timeout)
+        if self.timeout <= 0:
+            raise ModelClientError("Timeout must be greater than 0 seconds")
+
+        if self.max_retries < 0:
+            logger.warning("OPENAI_MAX_RETRIES=%s is negative; falling back to 0.", self.max_retries)
+            self.max_retries = 0
+
+        if self.retry_backoff_factor < 0:
+            logger.warning(
+                "OPENAI_RETRY_BACKOFF=%s is negative; falling back to 0.",
+                self.retry_backoff_factor,
+            )
+            self.retry_backoff_factor = 0.0
+
+        self._session = self._build_session()
+
 
     def generate(
         self,
@@ -81,10 +105,15 @@ class ModelClient:
             "messages": self._build_messages(system_prompt, state_snapshot, user_message),
         }
 
+        logger.info(
+            "Запрос к модели",
+            extra={"model": self.model_name, "payload": payload},
+        )
+
         logger.debug("Отправляем запрос в модель", extra={"url": url, "model": self.model_name})
 
         try:
-            response = requests.post(
+            response = self._session.post(
                 url,
                 json=payload,
                 headers=self._headers(),
@@ -92,6 +121,10 @@ class ModelClient:
             )
         except requests.RequestException as exc:
             raise ModelClientError(f"Ошибка сети при обращении к модели: {exc}") from exc
+        logger.info(
+            "Ответ от модели (HTTP)",
+            extra={"model": self.model_name, "status_code": response.status_code},
+        )
 
         if response.status_code != 200:
             raise ModelClientError(
@@ -104,11 +137,44 @@ class ModelClient:
             raise ModelClientError(
                 f"Ответ модели не является корректным JSON: {response.text}"
             ) from exc
-
+        logger.info(
+            "Ответ от модели (JSON)",
+            extra={"model": self.model_name, "response": data},
+        )
         content = self._extract_content(data)
+        logger.info(
+            "Ответ от модели (контент)",
+            extra={"model": self.model_name, "content": content},
+        )
         if not content:
             raise ModelClientError("Пустой ответ от модели")
         return content
+
+    def _build_session(self) -> requests.Session:
+        session = requests.Session()
+        retry = Retry(
+            total=self.max_retries,
+            connect=self.max_retries,
+            read=self.max_retries,
+            redirect=0,
+            backoff_factor=self.retry_backoff_factor,
+            status_forcelist=self.retry_statuses,
+            allowed_methods=frozenset({"POST"}),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        return session
+
+    @staticmethod
+    def _normalize_timeout(timeout: float) -> float:
+        if isinstance(timeout, (int, float)):
+            return float(timeout)
+        try:
+            return float(timeout)
+        except (TypeError, ValueError) as exc:
+            raise ModelClientError(f"Timeout value must be convertible to float, got {timeout!r}") from exc
 
     def _build_messages(
         self,
@@ -181,4 +247,50 @@ def build_default_model_client(model_name: Optional[str] = None) -> ModelClient:
     api_key = os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
     resolved_model_name = resolve_model_name(model_name)
-    return ModelClient(model_name=resolved_model_name, api_key=api_key, base_url=base_url)
+    timeout = _read_float_env("OPENAI_TIMEOUT", default=60.0, minimum=1.0)
+    max_retries = _read_int_env("OPENAI_MAX_RETRIES", default=3, minimum=0)
+    backoff = _read_float_env("OPENAI_RETRY_BACKOFF", default=1.0, minimum=0.0)
+    return ModelClient(
+        model_name=resolved_model_name,
+        api_key=api_key,
+        base_url=base_url,
+        timeout=timeout,
+        max_retries=max_retries,
+        retry_backoff_factor=backoff,
+    )
+
+
+def _read_float_env(name: str, default: float, minimum: Optional[float] = None) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    candidate = raw_value.strip()
+    if not candidate:
+        return default
+    try:
+        value = float(candidate)
+    except ValueError:
+        logger.warning("%s=%s is not a valid float. Using %s.", name, raw_value, default)
+        return default
+    if minimum is not None and value < minimum:
+        logger.warning("%s=%s is below minimum. Using %s.", name, raw_value, default)
+        return default
+    return value
+
+
+def _read_int_env(name: str, default: int, minimum: Optional[int] = None) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    candidate = raw_value.strip()
+    if not candidate:
+        return default
+    try:
+        value = int(candidate)
+    except ValueError:
+        logger.warning("%s=%s is not a valid int. Using %s.", name, raw_value, default)
+        return default
+    if minimum is not None and value < minimum:
+        logger.warning("%s=%s is below minimum. Using %s.", name, raw_value, default)
+        return default
+    return value
