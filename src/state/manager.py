@@ -27,6 +27,9 @@ class AgentState:
         }
     )
     last_plan: Dict[str, Any] = field(default_factory=dict)
+    metrics: Dict[str, Any] = field(
+        default_factory=lambda: {"missing_fields": {}, "risk_warnings": {}}
+    )
     event_bindings: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -38,6 +41,7 @@ class AgentState:
             "in_progress": self.in_progress,
             "objects": self.objects,
             "last_plan": self.last_plan,
+            "metrics": self.metrics,
             "event_bindings": self.event_bindings,
         }
 
@@ -59,6 +63,13 @@ class AgentState:
                 **data.get("objects", {}),
             ),
             last_plan=dict(data.get("last_plan", {})),
+            metrics=dict(
+                {
+                    "missing_fields": {},
+                    "risk_warnings": {},
+                },
+                **data.get("metrics", {}),
+            ),
             event_bindings=list(data.get("event_bindings", [])),
         )
 

@@ -4,14 +4,11 @@ from src.orchestrator.context_builder import build_state_summary
 
 
 def test_summary_includes_key_sections():
-    """Резюме должно включать цели, подтверждения и известные объекты."""
+    """Резюме должно включать цели, последний план и известные объекты."""
 
     state = {
         "goals": ["Создать сделку", "Назначить встречу"],
         "in_progress": [{"description": "Ожидаем подтверждение суммы"}],
-        "confirmations": {
-            "deal_1_amount": {"status": "requested", "description": "Изменить сумму сделки"}
-        },
         "done": [
             {"description": "Создана сделка"},
             {"description": "Добавлен комментарий"},
@@ -20,12 +17,16 @@ def test_summary_includes_key_sections():
             "current_deal_id": 101,
             "current_contact_id": 55,
         },
+        "last_plan": {
+            "summary": "1) обновить сумму сделки",
+            "actions": [],
+        },
     }
 
     summary = build_state_summary(state, limit=800)
 
     assert "Активные цели" in summary
-    assert "Подтверждения" in summary
+    assert "Последний план" in summary
     assert "Известные объекты" in summary
     assert "101" in summary
     assert "55" in summary

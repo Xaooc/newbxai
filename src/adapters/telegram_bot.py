@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
-from concurrent.futures import ThreadPoolExecutor
+import os
+import queue
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Set
 
+from src.adapters.adaptive_executor import AdaptiveThreadPoolExecutor
 from src.orchestrator.agent import Orchestrator
 from telegram import Message, Update
 from telegram.constants import ChatAction
@@ -24,39 +26,6 @@ from telegram.ext import (
 logger = logging.getLogger(__name__)
 
 TELEGRAM_MESSAGE_LIMIT = 4096
-
-
-def _patch_python_telegram_bot() -> None:
-    """РџР°С‚С‡РёС‚ РјРµР¶РґСѓРІРµСЂСЃРёРѕРЅРЅСѓСЋ РѕС€РёР±РєСѓ telegram.ext Updater."""
-
-    try:
-        from telegram.ext._updater import Updater
-    except Exception:  # noqa: BLE001 - РЅРµСѓРґР°С‡Р° РґРѕРїСѓСЃРєР°РµС‚ СЂР°Р±РѕС‚Сѓ Р±РµР· РїР°С‚С‡Р°
-        return
-
-    storage_attr = "_patched_polling_cleanup_cb_storage"
-    storage = getattr(Updater, storage_attr, None)
-    if storage is None:
-        storage = {}
-        setattr(Updater, storage_attr, storage)
-
-    current_descriptor = getattr(Updater, "_Updater__polling_cleanup_cb", None)
-    if isinstance(current_descriptor, property):
-        return
-
-    def _getter(self):
-        return storage.get(id(self))
-
-    def _setter(self, value):
-        if value is None:
-            storage.pop(id(self), None)
-        else:
-            storage[id(self)] = value
-
-    def _deleter(self):
-        storage.pop(id(self), None)
-
-    setattr(Updater, "_Updater__polling_cleanup_cb", property(_getter, _setter, _deleter))
 
 
 
@@ -87,16 +56,18 @@ class TelegramBotAdapter:
     def __init__(self, orchestrator: Orchestrator, config: TelegramBotConfig) -> None:
         self._orchestrator = orchestrator
         self._config = config
-        workers = max(1, config.worker_threads)
-        self._executor = ThreadPoolExecutor(
-            max_workers=workers,
-            thread_name_prefix="telegram-worker",
+        min_workers = max(1, config.worker_threads)
+        max_workers = max(min_workers, min(32, (os.cpu_count() or 1) * 4))
+        self._executor = AdaptiveThreadPoolExecutor(
+            min_workers=min_workers,
+            max_workers=max_workers,
         )
+        self._service_alerts: "queue.Queue[str]" = queue.Queue()
+        self._orchestrator.register_alert_handler(self._service_alerts.put_nowait)
 
     def run(self) -> None:
         """Запускает polling-бота."""
 
-        _patch_python_telegram_bot()
         application = ApplicationBuilder().token(self._config.token).build()
 
         application.add_handler(CommandHandler("start", self._handle_start))
@@ -176,6 +147,9 @@ class TelegramBotAdapter:
                 await typing_task
             except Exception:  # noqa: BLE001 - ошибки индикации не должны прерывать логику
                 logger.debug("Ошибка при отправке статуса набора текста", exc_info=True)
+
+        for alert in self._drain_service_alerts():
+            await self._send_error_notification(context, f"⚠️ {alert}")
 
         await self._reply_with_text(telegram_message, response)
 
@@ -257,6 +231,17 @@ class TelegramBotAdapter:
             await application.bot.send_message(chat_id=chat_id, text=message)
         except Exception:  # noqa: BLE001 - уведомление не должно прерывать работу бота
             logger.warning("Не удалось отправить уведомление об ошибке в чат %s", chat_id)
+
+    def _drain_service_alerts(self) -> List[str]:
+        """Извлекает накопленные сервисные алерты из очереди."""
+
+        alerts: List[str] = []
+        while True:
+            try:
+                alerts.append(self._service_alerts.get_nowait())
+            except queue.Empty:
+                break
+        return alerts
 
     async def _typing_indicator_loop(
         self,
