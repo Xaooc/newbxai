@@ -29,19 +29,10 @@ def build_state_summary(state_snapshot: Dict[str, Any], limit: int = DEFAULT_SUM
     else:
         lines.append("Активных целей нет — ожидаю новую задачу.")
 
-    plan = state_snapshot.get("plan_confirmation") or {}
-    plan_status = (plan.get("status") or "").lower()
-    plan_summary = _safe_text(plan.get("summary")) if plan.get("summary") else ""
-    if plan_status == "pending":
-        details = plan_summary or "ожидает подтверждения"
-        lines.append(f"План ожидает подтверждения: {details}.")
-    elif plan_status == "approved":
-        if plan_summary:
-            lines.append(f"План подтверждён: {plan_summary}.")
-        else:
-            lines.append("План подтверждён и выполняется.")
-    elif plan_status == "denied":
-        lines.append("Последний план был отклонён и ожидает обновления.")
+    last_plan = state_snapshot.get("last_plan") or {}
+    plan_summary = _safe_text(last_plan.get("summary")) if last_plan.get("summary") else ""
+    if plan_summary:
+        lines.append(f"Последний план: {plan_summary}.")
 
     in_progress = _as_list(state_snapshot.get("in_progress"))
     if in_progress:
@@ -50,16 +41,6 @@ def build_state_summary(state_snapshot: Dict[str, Any], limit: int = DEFAULT_SUM
         )
         tail = " (есть и другие)" if len(in_progress) > 3 else ""
         lines.append(f"Открытые шаги: {items}{tail}.")
-
-    confirmations = state_snapshot.get("confirmations") or {}
-    confirmation_lines: List[str] = []
-    for key, data in list(confirmations.items())[:3]:
-        status = (data or {}).get("status", "unknown")
-        description = _safe_text((data or {}).get("description") or key)
-        confirmation_lines.append(f"{description} — статус {status}.")
-    if confirmation_lines:
-        extra = " Есть и другие." if len(confirmations) > 3 else ""
-        lines.append("Подтверждения: " + " ".join(confirmation_lines) + extra)
 
     done = _as_list(state_snapshot.get("done"))
     if done:

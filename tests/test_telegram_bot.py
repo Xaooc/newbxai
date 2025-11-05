@@ -1,7 +1,7 @@
 """Тесты утилит Telegram-адаптера."""
 
 from types import SimpleNamespace
-from typing import List, Tuple
+from typing import Callable, List, Tuple
 
 import pytest
 
@@ -81,15 +81,22 @@ class FakeBot:
 class FakeOrchestrator:
     """Заглушка оркестратора, имитирующая обработку сообщения."""
 
-    def __init__(self, *, should_fail: bool = False) -> None:
+    def __init__(self, *, should_fail: bool = False, alert_message: str | None = None) -> None:
         self.should_fail = should_fail
+        self.alert_message = alert_message
         self.calls: List[Tuple[str, str]] = []
+        self._alert_handler: Callable[[str], None] | None = None
 
     def process_message(self, user_id: str, message: str) -> str:
         if self.should_fail:
             raise RuntimeError("boom")
         self.calls.append((user_id, message))
+        if self.alert_message and self._alert_handler:
+            self._alert_handler(self.alert_message)
         return "Готово"
+
+    def register_alert_handler(self, handler: Callable[[str], None]) -> None:
+        self._alert_handler = handler
 
 
 def _make_update(chat_id: int, user_id: int, message: FakeMessage) -> SimpleNamespace:
@@ -165,6 +172,28 @@ def test_handle_text_message_error_notifies_admin(monkeypatch):
 
     assert message.replies
     assert bot.sent and bot.sent[-1][0] == 999
+
+
+def test_service_alert_forwarded_to_admin():
+    """Сервисные алерты оркестратора пересылаются в административный чат."""
+
+    orchestrator = FakeOrchestrator(alert_message="Повторяющиеся ошибки Bitrix24")
+    config = TelegramBotConfig(token="x", error_chat_id=321)
+    adapter = TelegramBotAdapter(orchestrator, config)
+
+    message = FakeMessage("Запрос", chat_id=1)
+    update = _make_update(chat_id=1, user_id=99, message=message)
+    bot = FakeBot()
+    context = _make_context(bot)
+
+    async def scenario() -> None:
+        await adapter._handle_text_message(update, context)
+
+    asyncio.run(scenario())
+    adapter._executor.shutdown(wait=True)
+
+    assert bot.sent
+    assert any("Повторяющиеся ошибки Bitrix24" in text for _, text in bot.sent)
 
 
 def test_non_text_message_returns_hint():
